@@ -277,8 +277,9 @@ class Aira(_BaseMixin):
     def get_receipt(self, receipt_id: str) -> dict:
         return self._get(f"/receipts/{receipt_id}")
 
-    def export_receipt(self, receipt_id: str) -> dict:
-        return self._get(f"/receipts/{receipt_id}/export")
+    def export_receipt(self, receipt_id: str, format: str = "json") -> dict:
+        """Export receipt. format: 'json' or 'pdf'."""
+        return self._get(f"/receipts/{receipt_id}/export", {"format": format})
 
     # ==================== Evidence ====================
 
@@ -366,9 +367,9 @@ class Aira(_BaseMixin):
 
     # ==================== Chat ====================
 
-    def ask(self, message: str, history: list[dict] | None = None) -> dict:
+    def ask(self, message: str, history: list[dict] | None = None, model: str | None = None) -> dict:
         """Ask Aira a question about your data."""
-        return self._post("/chat", _build_body(message=message, history=history))
+        return self._post("/chat", _build_body(message=message, history=history, model=model))
 
     # ==================== Decorator ====================
 
@@ -539,8 +540,8 @@ class AsyncAira(_BaseMixin):
     async def get_receipt(self, receipt_id: str) -> dict:
         return await self._get(f"/receipts/{receipt_id}")
 
-    async def export_receipt(self, receipt_id: str) -> dict:
-        return await self._get(f"/receipts/{receipt_id}/export")
+    async def export_receipt(self, receipt_id: str, format: str = "json") -> dict:
+        return await self._get(f"/receipts/{receipt_id}/export", {"format": format})
 
     # ==================== Evidence ====================
 
@@ -607,8 +608,8 @@ class AsyncAira(_BaseMixin):
 
     # ==================== Chat ====================
 
-    async def ask(self, message: str, history: list[dict] | None = None) -> dict:
-        return await self._post("/chat", _build_body(message=message, history=history))
+    async def ask(self, message: str, history: list[dict] | None = None, model: str | None = None) -> dict:
+        return await self._post("/chat", _build_body(message=message, history=history, model=model))
 
     # ==================== Decorator ====================
 

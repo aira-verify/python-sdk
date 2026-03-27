@@ -200,7 +200,7 @@ tx = aira.escrow_deposit(account.id, amount=5000.00, description="10% liability 
 aira.escrow_release(account.id, amount=5000.00)
 
 # Dispute if something goes wrong
-aira.escrow_dispute(account.id, amount=2000.00, reason="Incorrect vendor payment")
+aira.escrow_dispute(account.id, amount=2000.00, description="Incorrect vendor payment")
 
 # List accounts
 accounts, pagination = aira.list_escrow_accounts(page=1)
