@@ -297,8 +297,11 @@ MIT
 
 ## Links
 
+- [Website](https://airaproof.com)
+- [PyPI Package](https://pypi.org/project/aira-sdk/)
 - [Interactive Demo](https://app.airaproof.com/demo) — try Aira in your browser, no code needed
 - [Documentation](https://docs.airaproof.com)
 - [API Reference](https://docs.airaproof.com/docs/api-reference)
+- [TypeScript SDK](https://www.npmjs.com/package/aira-sdk)
 - [Dashboard](https://app.airaproof.com)
 - [GitHub](https://github.com/aira-proof/python-sdk)
