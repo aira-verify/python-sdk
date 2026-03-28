@@ -107,5 +107,5 @@ python agent.py
 
 - [SDK Documentation](https://docs.airaproof.com/docs/getting-started/sdk)
 - [API Reference](https://docs.airaproof.com/docs/api-reference)
-- [GitHub — aira-sdk](https://github.com/aira-verify/python-sdk)
+- [GitHub — aira-sdk](https://github.com/aira-proof/python-sdk)
 - [PyPI — aira-sdk](https://pypi.org/project/aira-sdk/)

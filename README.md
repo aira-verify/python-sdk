@@ -280,7 +280,7 @@ aira = Aira(
 ## Development
 
 ```bash
-git clone https://github.com/aira-verify/python-sdk.git
+git clone https://github.com/aira-proof/python-sdk.git
 cd python-sdk
 pip install -e ".[dev]"
 pytest
@@ -295,4 +295,4 @@ MIT
 - [Documentation](https://docs.airaproof.com)
 - [API Reference](https://docs.airaproof.com/docs/api-reference)
 - [Dashboard](https://app.airaproof.com)
-- [GitHub](https://github.com/aira-verify/python-sdk)
+- [GitHub](https://github.com/aira-proof/python-sdk)
