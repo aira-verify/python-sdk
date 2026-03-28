@@ -292,6 +292,7 @@ MIT
 
 ## Links
 
+- [Interactive Demo](https://app.airaproof.com/demo) — try Aira in your browser, no code needed
 - [Documentation](https://docs.airaproof.com)
 - [API Reference](https://docs.airaproof.com/docs/api-reference)
 - [Dashboard](https://app.airaproof.com)
