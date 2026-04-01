@@ -383,6 +383,78 @@ class Aira(_BaseMixin):
         """Ask Aira a question about your data."""
         return self._post("/chat", _build_body(message=message, history=history, model=model))
 
+    # ==================== DID ====================
+
+    def get_agent_did(self, slug: str) -> dict:
+        """Get full DID info for an agent."""
+        return self._get(f"/agents/{slug}/did")
+
+    def rotate_agent_keys(self, slug: str) -> dict:
+        """Rotate an agent's DID keypair."""
+        return self._post(f"/agents/{slug}/did/rotate", {})
+
+    def resolve_did(self, did: str) -> dict:
+        """Resolve any did:web DID to its DID document."""
+        return self._post("/dids/resolve", {"did": did})
+
+    # ==================== Verifiable Credentials ====================
+
+    def get_agent_credential(self, slug: str) -> dict:
+        """Get the current valid VC for an agent."""
+        return self._get(f"/agents/{slug}/credential")
+
+    def get_agent_credentials(self, slug: str) -> dict:
+        """Get full credential history for an agent."""
+        return self._get(f"/agents/{slug}/credentials")
+
+    def revoke_credential(self, slug: str, reason: str = "") -> dict:
+        """Revoke the current credential for an agent."""
+        return self._post(f"/agents/{slug}/credentials/revoke", {"reason": reason})
+
+    def verify_credential(self, credential: dict) -> dict:
+        """Verify a Verifiable Credential — checks signature, expiry, revocation."""
+        return self._post("/credentials/verify", {"credential": credential})
+
+    # ==================== Mutual Notarization ====================
+
+    def request_mutual_sign(self, action_id: str, counterparty_did: str) -> dict:
+        """Initiate a mutual signing request for an action."""
+        return self._post(f"/actions/{action_id}/mutual-sign/request", {"counterparty_did": counterparty_did})
+
+    def get_pending_mutual_sign(self, action_id: str) -> dict:
+        """Get the action payload awaiting counterparty signature."""
+        return self._get(f"/actions/{action_id}/mutual-sign/pending")
+
+    def complete_mutual_sign(self, action_id: str, did: str, signature: str, signed_payload_hash: str) -> dict:
+        """Submit counterparty signature to complete mutual signing."""
+        return self._post(f"/actions/{action_id}/mutual-sign/complete", {"did": did, "signature": signature, "signed_payload_hash": signed_payload_hash})
+
+    def get_mutual_sign_receipt(self, action_id: str) -> dict:
+        """Get the co-signed receipt for a mutually signed action."""
+        return self._get(f"/actions/{action_id}/mutual-sign/receipt")
+
+    def reject_mutual_sign(self, action_id: str, reason: str = "") -> dict:
+        """Reject a mutual signing request."""
+        return self._post(f"/actions/{action_id}/mutual-sign/reject", {"reason": reason})
+
+    # ==================== Reputation ====================
+
+    def get_reputation(self, slug: str) -> dict:
+        """Get current reputation score for an agent."""
+        return self._get(f"/agents/{slug}/reputation")
+
+    def get_reputation_history(self, slug: str) -> dict:
+        """Get full reputation history for an agent."""
+        return self._get(f"/agents/{slug}/reputation/history")
+
+    def attest_reputation(self, slug: str, counterparty_did: str, action_id: str, attestation: str, signature: str) -> dict:
+        """Submit a signed attestation of a successful interaction."""
+        return self._post(f"/agents/{slug}/reputation/attest", {"counterparty_did": counterparty_did, "action_id": action_id, "attestation": attestation, "signature": signature})
+
+    def verify_reputation(self, slug: str) -> dict:
+        """Verify a reputation score by returning inputs and score_hash."""
+        return self._get(f"/agents/{slug}/reputation/verify")
+
     # ==================== Offline sync ====================
 
     def sync(self) -> list:
@@ -667,6 +739,78 @@ class AsyncAira(_BaseMixin):
 
     async def ask(self, message: str, history: list[dict] | None = None, model: str | None = None) -> dict:
         return await self._post("/chat", _build_body(message=message, history=history, model=model))
+
+    # ==================== DID ====================
+
+    async def get_agent_did(self, slug: str) -> dict:
+        """Get full DID info for an agent."""
+        return await self._get(f"/agents/{slug}/did")
+
+    async def rotate_agent_keys(self, slug: str) -> dict:
+        """Rotate an agent's DID keypair."""
+        return await self._post(f"/agents/{slug}/did/rotate", {})
+
+    async def resolve_did(self, did: str) -> dict:
+        """Resolve any did:web DID to its DID document."""
+        return await self._post("/dids/resolve", {"did": did})
+
+    # ==================== Verifiable Credentials ====================
+
+    async def get_agent_credential(self, slug: str) -> dict:
+        """Get the current valid VC for an agent."""
+        return await self._get(f"/agents/{slug}/credential")
+
+    async def get_agent_credentials(self, slug: str) -> dict:
+        """Get full credential history for an agent."""
+        return await self._get(f"/agents/{slug}/credentials")
+
+    async def revoke_credential(self, slug: str, reason: str = "") -> dict:
+        """Revoke the current credential for an agent."""
+        return await self._post(f"/agents/{slug}/credentials/revoke", {"reason": reason})
+
+    async def verify_credential(self, credential: dict) -> dict:
+        """Verify a Verifiable Credential — checks signature, expiry, revocation."""
+        return await self._post("/credentials/verify", {"credential": credential})
+
+    # ==================== Mutual Notarization ====================
+
+    async def request_mutual_sign(self, action_id: str, counterparty_did: str) -> dict:
+        """Initiate a mutual signing request for an action."""
+        return await self._post(f"/actions/{action_id}/mutual-sign/request", {"counterparty_did": counterparty_did})
+
+    async def get_pending_mutual_sign(self, action_id: str) -> dict:
+        """Get the action payload awaiting counterparty signature."""
+        return await self._get(f"/actions/{action_id}/mutual-sign/pending")
+
+    async def complete_mutual_sign(self, action_id: str, did: str, signature: str, signed_payload_hash: str) -> dict:
+        """Submit counterparty signature to complete mutual signing."""
+        return await self._post(f"/actions/{action_id}/mutual-sign/complete", {"did": did, "signature": signature, "signed_payload_hash": signed_payload_hash})
+
+    async def get_mutual_sign_receipt(self, action_id: str) -> dict:
+        """Get the co-signed receipt for a mutually signed action."""
+        return await self._get(f"/actions/{action_id}/mutual-sign/receipt")
+
+    async def reject_mutual_sign(self, action_id: str, reason: str = "") -> dict:
+        """Reject a mutual signing request."""
+        return await self._post(f"/actions/{action_id}/mutual-sign/reject", {"reason": reason})
+
+    # ==================== Reputation ====================
+
+    async def get_reputation(self, slug: str) -> dict:
+        """Get current reputation score for an agent."""
+        return await self._get(f"/agents/{slug}/reputation")
+
+    async def get_reputation_history(self, slug: str) -> dict:
+        """Get full reputation history for an agent."""
+        return await self._get(f"/agents/{slug}/reputation/history")
+
+    async def attest_reputation(self, slug: str, counterparty_did: str, action_id: str, attestation: str, signature: str) -> dict:
+        """Submit a signed attestation of a successful interaction."""
+        return await self._post(f"/agents/{slug}/reputation/attest", {"counterparty_did": counterparty_did, "action_id": action_id, "attestation": attestation, "signature": signature})
+
+    async def verify_reputation(self, slug: str) -> dict:
+        """Verify a reputation score by returning inputs and score_hash."""
+        return await self._get(f"/agents/{slug}/reputation/verify")
 
     # ==================== Session ====================
 

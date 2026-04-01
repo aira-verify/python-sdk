@@ -613,3 +613,159 @@ class TestAsync:
                     return 42
                 assert await compute() == 42
                 assert "42" in m.call_args[1]["json"]["details"]
+
+
+# ==================== Trust Layer: DID ====================
+
+class TestSyncDID:
+    def setup_method(self):
+        self.c = Aira(api_key="aira_live_test", base_url="http://test")
+
+    def teardown_method(self):
+        self.c.close()
+
+    def test_get_agent_did(self):
+        did_data = {"did": "did:web:airaproof.com:agents:my-agent", "document": {}, "version": 1}
+        with patch.object(self.c._client, "get", return_value=_resp(did_data)):
+            result = self.c.get_agent_did("my-agent")
+            assert result["did"] == "did:web:airaproof.com:agents:my-agent"
+
+    def test_rotate_agent_keys(self):
+        with patch.object(self.c._client, "post", return_value=_resp({"did": "did:web:airaproof.com:agents:my-agent", "version": 2})):
+            result = self.c.rotate_agent_keys("my-agent")
+            assert result["version"] == 2
+
+    def test_resolve_did(self):
+        doc = {"id": "did:web:example.com:agents:other", "verificationMethod": []}
+        with patch.object(self.c._client, "post", return_value=_resp(doc)) as m:
+            result = self.c.resolve_did("did:web:example.com:agents:other")
+            assert result["id"] == "did:web:example.com:agents:other"
+            body = m.call_args[1]["json"]
+            assert body["did"] == "did:web:example.com:agents:other"
+
+
+# ==================== Trust Layer: Verifiable Credentials ====================
+
+class TestSyncCredentials:
+    def setup_method(self):
+        self.c = Aira(api_key="aira_live_test", base_url="http://test")
+
+    def teardown_method(self):
+        self.c.close()
+
+    def test_get_agent_credential(self):
+        vc = {"type": ["VerifiableCredential", "AgentCapabilityCredential"], "issuer": "did:web:airaproof.com"}
+        with patch.object(self.c._client, "get", return_value=_resp(vc)):
+            result = self.c.get_agent_credential("my-agent")
+            assert "VerifiableCredential" in result["type"]
+
+    def test_get_agent_credentials(self):
+        with patch.object(self.c._client, "get", return_value=_resp({"credentials": [{"id": "vc-1"}, {"id": "vc-2"}]})):
+            result = self.c.get_agent_credentials("my-agent")
+            assert len(result["credentials"]) == 2
+
+    def test_revoke_credential(self):
+        with patch.object(self.c._client, "post", return_value=_resp({"revoked": True})) as m:
+            result = self.c.revoke_credential("my-agent", reason="Compromised")
+            assert result["revoked"] is True
+            body = m.call_args[1]["json"]
+            assert body["reason"] == "Compromised"
+
+    def test_revoke_credential_default_reason(self):
+        with patch.object(self.c._client, "post", return_value=_resp({"revoked": True})) as m:
+            self.c.revoke_credential("my-agent")
+            body = m.call_args[1]["json"]
+            assert body["reason"] == ""
+
+    def test_verify_credential(self):
+        vc = {"type": ["VerifiableCredential"], "proof": {"type": "Ed25519Signature2020"}}
+        with patch.object(self.c._client, "post", return_value=_resp({"valid": True, "checks": {}})) as m:
+            result = self.c.verify_credential(vc)
+            assert result["valid"] is True
+            body = m.call_args[1]["json"]
+            assert body["credential"] == vc
+
+
+# ==================== Trust Layer: Mutual Notarization ====================
+
+class TestSyncMutualSign:
+    def setup_method(self):
+        self.c = Aira(api_key="aira_live_test", base_url="http://test")
+
+    def teardown_method(self):
+        self.c.close()
+
+    def test_request_mutual_sign(self):
+        with patch.object(self.c._client, "post", return_value=_resp({"status": "pending", "action_id": "act-1"})) as m:
+            result = self.c.request_mutual_sign("act-1", "did:web:example.com:agents:other")
+            assert result["status"] == "pending"
+            body = m.call_args[1]["json"]
+            assert body["counterparty_did"] == "did:web:example.com:agents:other"
+
+    def test_get_pending_mutual_sign(self):
+        with patch.object(self.c._client, "get", return_value=_resp({"payload": {"action_id": "act-1"}, "payload_hash": "sha256:abc"})):
+            result = self.c.get_pending_mutual_sign("act-1")
+            assert result["payload_hash"] == "sha256:abc"
+
+    def test_complete_mutual_sign(self):
+        with patch.object(self.c._client, "post", return_value=_resp({"status": "completed", "combined_receipt_hash": "sha256:xyz"})) as m:
+            result = self.c.complete_mutual_sign("act-1", "did:web:example.com:agents:other", "zsig123", "sha256:abc")
+            assert result["status"] == "completed"
+            body = m.call_args[1]["json"]
+            assert body["did"] == "did:web:example.com:agents:other"
+            assert body["signature"] == "zsig123"
+            assert body["signed_payload_hash"] == "sha256:abc"
+
+    def test_get_mutual_sign_receipt(self):
+        with patch.object(self.c._client, "get", return_value=_resp({"receipt_id": "rct-1", "signatures": ["sig-a", "sig-b"]})):
+            result = self.c.get_mutual_sign_receipt("act-1")
+            assert len(result["signatures"]) == 2
+
+    def test_reject_mutual_sign(self):
+        with patch.object(self.c._client, "post", return_value=_resp({"status": "rejected"})) as m:
+            result = self.c.reject_mutual_sign("act-1", reason="Not authorized")
+            assert result["status"] == "rejected"
+            body = m.call_args[1]["json"]
+            assert body["reason"] == "Not authorized"
+
+    def test_reject_mutual_sign_default_reason(self):
+        with patch.object(self.c._client, "post", return_value=_resp({"status": "rejected"})) as m:
+            self.c.reject_mutual_sign("act-1")
+            body = m.call_args[1]["json"]
+            assert body["reason"] == ""
+
+
+# ==================== Trust Layer: Reputation ====================
+
+class TestSyncReputation:
+    def setup_method(self):
+        self.c = Aira(api_key="aira_live_test", base_url="http://test")
+
+    def teardown_method(self):
+        self.c.close()
+
+    def test_get_reputation(self):
+        with patch.object(self.c._client, "get", return_value=_resp({"score": 84, "tier": "Verified"})):
+            result = self.c.get_reputation("my-agent")
+            assert result["score"] == 84
+            assert result["tier"] == "Verified"
+
+    def test_get_reputation_history(self):
+        with patch.object(self.c._client, "get", return_value=_resp({"history": [{"score": 80}, {"score": 84}]})):
+            result = self.c.get_reputation_history("my-agent")
+            assert len(result["history"]) == 2
+
+    def test_attest_reputation(self):
+        with patch.object(self.c._client, "post", return_value=_resp({"recorded": True})) as m:
+            result = self.c.attest_reputation("my-agent", "did:web:example.com:agents:other", "act-1", "positive", "zsig456")
+            assert result["recorded"] is True
+            body = m.call_args[1]["json"]
+            assert body["counterparty_did"] == "did:web:example.com:agents:other"
+            assert body["action_id"] == "act-1"
+            assert body["attestation"] == "positive"
+            assert body["signature"] == "zsig456"
+
+    def test_verify_reputation(self):
+        with patch.object(self.c._client, "get", return_value=_resp({"score_hash": "sha256:rep", "inputs": {}})):
+            result = self.c.verify_reputation("my-agent")
+            assert result["score_hash"] == "sha256:rep"
