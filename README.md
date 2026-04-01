@@ -297,7 +297,7 @@ Supported event types: `action.notarized`, `action.authorized`, `agent.registere
 
 ## Core SDK Methods
 
-All 29 methods on `Aira` (sync) and `AsyncAira` (async). Every write operation produces a cryptographic receipt.
+All 45 methods on `Aira` (sync) and `AsyncAira` (async). Every write operation produces a cryptographic receipt.
 
 | Category | Method | Description |
 |---|---|---|
@@ -318,6 +318,22 @@ All 29 methods on `Aira` (sync) and `AsyncAira` (async). Every write operation p
 | | `decommission_agent()` | Decommission agent |
 | | `transfer_agent()` | Transfer ownership to another org |
 | | `get_agent_actions()` | List actions by agent |
+| **Trust Layer** | `get_agent_did()` | Retrieve agent's W3C DID (`did:web`) |
+| | `rotate_agent_keys()` | Rotate agent's Ed25519 signing keys |
+| | `get_agent_credential()` | Get agent's W3C Verifiable Credential |
+| | `verify_credential()` | Verify a Verifiable Credential |
+| | `revoke_credential()` | Revoke agent's Verifiable Credential |
+| | `request_mutual_sign()` | Initiate mutual notarization with counterparty |
+| | `complete_mutual_sign()` | Complete mutual notarization (counterparty signs) |
+| | `get_mutual_sign_status()` | Check status of a mutual sign request |
+| | `get_reputation()` | Get agent reputation score and tier |
+| | `list_reputation_history()` | List reputation score history |
+| | `set_endpoint_policy()` | Set endpoint verification policy |
+| | `get_endpoint_policy()` | Get current endpoint policy |
+| | `resolve_did()` | Resolve any DID to its DID Document |
+| | `check_trust()` | Run full trust check against a counterparty |
+| | `list_credentials()` | List all credentials for an agent |
+| | `get_trust_bundle()` | Get DID + VC + reputation in one call |
 | **Cases** | `run_case()` | Multi-model consensus adjudication |
 | | `get_case()` | Retrieve case result |
 | | `list_cases()` | List cases |
@@ -343,6 +359,88 @@ All 29 methods on `Aira` (sync) and `AsyncAira` (async). Every write operation p
 | **Chat** | `ask()` | Query your notarized data via AI |
 | **Offline** | `sync()` | Flush offline queue to API |
 | **Session** | `session()` | Scoped session with pre-filled defaults |
+
+---
+
+## Trust Layer
+
+Standards-based identity and trust for agents: W3C DIDs, Verifiable Credentials, mutual notarization, and reputation scoring. Every agent gets a cryptographically verifiable identity that other agents (and humans) can check before interacting.
+
+### DID Identity
+
+Every registered agent gets a W3C-compliant DID (`did:web`):
+
+```python
+# Retrieve the agent's DID
+did = aira.get_agent_did("my-agent")
+print(did)  # "did:web:airaproof.com:agents:my-agent"
+
+# Rotate signing keys (old keys are revoked, new keys are published)
+aira.rotate_agent_keys("my-agent")
+```
+
+### Verifiable Credentials
+
+```python
+# Get the agent's W3C Verifiable Credential
+vc = aira.get_agent_credential("my-agent")
+
+# Verify any VC (returns validity, issuer, expiry)
+result = aira.verify_credential(vc)
+print(result["valid"])  # True
+
+# Revoke a credential
+aira.revoke_credential("my-agent", reason="Agent deprecated")
+```
+
+### Mutual Notarization
+
+For high-stakes actions, both parties co-sign:
+
+```python
+# Agent A initiates — sends a signing request to the counterparty
+request = aira.request_mutual_sign(
+    action_id="act-uuid",
+    counterparty_did="did:web:partner.com:agents:their-agent",
+)
+
+# Agent B completes — signs the same payload
+receipt = aira.complete_mutual_sign(
+    action_id="act-uuid",
+    did="did:web:partner.com:agents:their-agent",
+    signature="z...",
+    signed_payload_hash="sha256:...",
+)
+```
+
+### Reputation
+
+```python
+rep = aira.get_reputation("my-agent")
+print(rep["score"])  # 84
+print(rep["tier"])   # "Verified"
+```
+
+### Trust Policy in Integrations
+
+Pass a `trust_policy` to any framework integration to run automated trust checks before agent interactions:
+
+```python
+from aira.extras.langchain import AiraCallbackHandler
+
+handler = AiraCallbackHandler(
+    client=aira,
+    agent_id="research-agent",
+    model_id="gpt-4o",
+    trust_policy={
+        "verify_counterparty": True,   # resolve counterparty DID
+        "min_reputation": 60,          # warn if reputation score below 60
+        "require_valid_vc": True,      # check Verifiable Credential validity
+        "block_revoked_vc": True,      # block if counterparty VC is revoked
+        "block_unregistered": False,   # don't block agents without Aira DIDs
+    },
+)
+```
 
 ---
 
