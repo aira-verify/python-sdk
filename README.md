@@ -49,7 +49,7 @@ All 52 methods on `Aira` (sync) and `AsyncAira` (async). Every write operation p
 
 | Category | Method | Description |
 |---|---|---|
-| **Actions** | `notarize()` | Notarize an action -- returns Ed25519-signed receipt |
+| **Actions** | `notarize()` | Notarize an action -- returns Ed25519-signed receipt (supports `require_approval`) |
 | | `get_action()` | Retrieve action details + receipt |
 | | `list_actions()` | List actions with filters (type, agent, status) |
 | | `authorize_action()` | Human co-signature on high-stakes action |
@@ -281,6 +281,42 @@ print(aira.pending_count)  # 2
 # Flush to API when back online — receipts are generated for each action
 results = aira.sync()
 ```
+
+---
+
+## Human Approval
+
+Hold high-stakes actions for human review before the cryptographic receipt is issued. Approvers receive an email with Approve/Deny buttons — the receipt is only minted after approval.
+
+```python
+# Explicit approvers
+receipt = aira.notarize(
+    action_type="loan_decision",
+    details="Approved €15,000 loan for Maria Schmidt",
+    agent_id="lending-agent",
+    require_approval=True,
+    approvers=["compliance@acme.com", "risk@acme.com"],
+)
+print(receipt.status)      # "pending_approval"
+print(receipt.receipt_id)  # None — no receipt until approved
+
+# Falls back to org default approvers (Settings → Approvers)
+receipt = aira.notarize(
+    action_type="wire_transfer",
+    details="Transfer $50,000 to vendor account",
+    agent_id="payments-agent",
+    require_approval=True,
+)
+
+# Decorator — approval gate on every call
+@aira.trace(agent_id="billing-agent", require_approval=True, approvers=["finance@acme.com"])
+def charge_customer(amount):
+    stripe.charge(amount)
+```
+
+The approver clicks "Approve" in the email → receipt is minted with Ed25519 signature + RFC 3161 timestamp → `action.approved` webhook fires. If denied, no receipt is created and `action.denied` webhook fires.
+
+Configure default approvers in the [dashboard](https://app.airaproof.com/dashboard/settings/approvers) or via the `/approvers` API.
 
 ---
 
