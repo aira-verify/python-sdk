@@ -171,6 +171,8 @@ class Aira(_BaseMixin):
         parent_action_id: str | None = None,
         store_details: bool = False,
         idempotency_key: str | None = None,
+        require_approval: bool = False,
+        approvers: list[str] | None = None,
     ) -> ActionReceipt:
         """Notarize an agent action. Returns a cryptographic receipt."""
         body = _build_body(
@@ -183,6 +185,8 @@ class Aira(_BaseMixin):
             instruction_hash=instruction_hash,
             parent_action_id=parent_action_id,
             idempotency_key=idempotency_key,
+            require_approval=require_approval or None,
+            approvers=approvers,
         )
         if store_details:
             body["store_details"] = True
@@ -491,6 +495,8 @@ class Aira(_BaseMixin):
         action_type: str = "function_call",
         model_id: str | None = None,
         include_result: bool = False,
+        require_approval: bool = False,
+        approvers: list[str] | None = None,
     ) -> Callable:
         """Decorator that auto-notarizes function calls.
 
@@ -501,6 +507,8 @@ class Aira(_BaseMixin):
             include_result: If True, includes the return value in details.
                 WARNING: Only enable if the function does NOT return sensitive data.
                 Disabled by default to prevent accidental PII/secret leakage.
+            require_approval: If True, action requires human approval before finalizing.
+            approvers: List of approver emails (used when require_approval is True).
         """
         def decorator(func: Callable) -> Callable:
             @functools.wraps(func)
@@ -520,6 +528,7 @@ class Aira(_BaseMixin):
                     self.notarize(
                         action_type=action_type, details=details,
                         agent_id=agent_id, model_id=model_id, instruction_hash=instruction_hash,
+                        require_approval=require_approval, approvers=approvers,
                     )
                 except Exception as e:
                     logger.warning("Aira notarization failed (non-blocking): %s", e)
@@ -608,8 +617,21 @@ class AsyncAira(_BaseMixin):
 
     # ==================== Actions ====================
 
-    async def notarize(self, action_type: str, details: str, **kwargs: Any) -> ActionReceipt:
-        body = _build_body(action_type=action_type, details=_sanitize_details(details), **kwargs)
+    async def notarize(
+        self,
+        action_type: str,
+        details: str,
+        require_approval: bool = False,
+        approvers: list[str] | None = None,
+        **kwargs: Any,
+    ) -> ActionReceipt:
+        body = _build_body(
+            action_type=action_type,
+            details=_sanitize_details(details),
+            require_approval=require_approval or None,
+            approvers=approvers,
+            **kwargs,
+        )
         return _to_dataclass(ActionReceipt, await self._post("/actions", body))
 
     async def get_action(self, action_id: str) -> ActionDetail:
@@ -857,7 +879,15 @@ class AsyncAira(_BaseMixin):
 
     # ==================== Decorator ====================
 
-    def trace(self, agent_id: str, action_type: str = "function_call", model_id: str | None = None, include_result: bool = False) -> Callable:
+    def trace(
+        self,
+        agent_id: str,
+        action_type: str = "function_call",
+        model_id: str | None = None,
+        include_result: bool = False,
+        require_approval: bool = False,
+        approvers: list[str] | None = None,
+    ) -> Callable:
         """Async decorator that auto-notarizes function calls. Safe by default — does NOT send args or return values."""
         def decorator(func: Callable) -> Callable:
             @functools.wraps(func)
@@ -869,7 +899,11 @@ class AsyncAira(_BaseMixin):
                 if include_result:
                     details += f" -> {str(result)[:200]}"
                 try:
-                    await self.notarize(action_type=action_type, details=details, agent_id=agent_id, model_id=model_id, instruction_hash=instruction_hash)
+                    await self.notarize(
+                        action_type=action_type, details=details,
+                        agent_id=agent_id, model_id=model_id, instruction_hash=instruction_hash,
+                        require_approval=require_approval, approvers=approvers,
+                    )
                 except Exception as e:
                     logger.warning("Aira notarization failed (non-blocking): %s", e)
                 return result

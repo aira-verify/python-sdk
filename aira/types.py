@@ -9,12 +9,13 @@ from datetime import datetime
 @dataclass
 class ActionReceipt:
     action_id: str
-    receipt_id: str
-    payload_hash: str
-    signature: str
-    timestamp_token: str | None
     created_at: str
     request_id: str
+    receipt_id: str | None = None
+    payload_hash: str | None = None
+    signature: str | None = None
+    timestamp_token: str | None = None
+    status: str = "notarized"
     warnings: list[str] | None = None
 
 
