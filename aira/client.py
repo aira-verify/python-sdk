@@ -381,7 +381,7 @@ class Aira(_BaseMixin):
 
     def ask(self, message: str, history: list[dict] | None = None, model: str | None = None) -> dict:
         """Ask Aira a question about your data."""
-        return self._post("/chat", _build_body(message=message, history=history, model=model))
+        return self._post("/chat", _build_body(message=message, history=history, model_id=model))
 
     # ==================== DID ====================
 
@@ -456,6 +456,11 @@ class Aira(_BaseMixin):
         return self._get(f"/agents/{slug}/reputation/verify")
 
     # ==================== Offline sync ====================
+
+    @property
+    def pending_count(self) -> int:
+        """Number of requests queued for sync. Returns 0 if not in offline mode."""
+        return self._queue.pending_count if self._queue else 0
 
     def sync(self) -> list:
         """Flush offline queue to API. Returns list of API responses."""
@@ -554,9 +559,11 @@ class AsyncAira(_BaseMixin):
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
+        offline: bool = False,
     ) -> None:
         _validate_api_key(api_key)
         self.base_url = base_url.rstrip("/")
+        self._api_key = api_key
         self._client = httpx.AsyncClient(
             base_url=f"{self.base_url}/api/v1",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
@@ -567,6 +574,7 @@ class AsyncAira(_BaseMixin):
             headers={"Content-Type": "application/json"},
             timeout=timeout,
         )
+        self._queue: OfflineQueue | None = OfflineQueue() if offline else None
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -578,10 +586,18 @@ class AsyncAira(_BaseMixin):
     async def __aexit__(self, *args: Any) -> None:
         await self.close()
 
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
+
     async def _post(self, path: str, body: dict) -> dict:
+        if self._queue is not None:
+            qid = self._queue.enqueue("POST", path, body)
+            return {"_offline": True, "_queue_id": qid}
         return _handle_response(await self._client.post(path, json=body))
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
+        if self._queue is not None:
+            raise AiraError(0, "OFFLINE", "GET requests not available in offline mode")
         return _handle_response(await self._client.get(path, params=params))
 
     async def _put(self, path: str, body: dict) -> dict:
@@ -738,7 +754,7 @@ class AsyncAira(_BaseMixin):
     # ==================== Chat ====================
 
     async def ask(self, message: str, history: list[dict] | None = None, model: str | None = None) -> dict:
-        return await self._post("/chat", _build_body(message=message, history=history, model=model))
+        return await self._post("/chat", _build_body(message=message, history=history, model_id=model))
 
     # ==================== DID ====================
 
@@ -811,6 +827,27 @@ class AsyncAira(_BaseMixin):
     async def verify_reputation(self, slug: str) -> dict:
         """Verify a reputation score by returning inputs and score_hash."""
         return await self._get(f"/agents/{slug}/reputation/verify")
+
+    # ==================== Offline sync ====================
+
+    @property
+    def pending_count(self) -> int:
+        """Number of requests queued for sync. Returns 0 if not in offline mode."""
+        return self._queue.pending_count if self._queue else 0
+
+    async def sync(self) -> list:
+        """Flush offline queue to API. Returns list of API responses."""
+        if self._queue is None:
+            raise ValueError("sync() is only available in offline mode")
+        items = self._queue.drain()
+        results = []
+        for item in items:
+            resp = await self._client.request(item.method, f"{self.base_url}/api/v1{item.path}", json=item.body, headers=self._headers())
+            if resp.status_code >= 400:
+                results.append({"_error": True, "_status": resp.status_code, "_queue_id": item.id})
+            else:
+                results.append(resp.json())
+        return results
 
     # ==================== Session ====================
 

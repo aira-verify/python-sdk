@@ -133,8 +133,8 @@ def main():
         pass
 
     # List agents
-    agents, pagination = aira.list_agents(page=1)
-    print(f"   ✓ {pagination['total']} agent(s) in registry")
+    agents = aira.list_agents(page=1)
+    print(f"   ✓ {agents.total} agent(s) in registry")
 
     # Get agent detail + versions
     detail = aira.get_agent(AGENT_SLUG)
@@ -191,8 +191,8 @@ def main():
     print(f"   ✓ Chain: {len(chain)} action(s)")
 
     # List with filter
-    actions, meta = aira.list_actions(page=1, action_type="loan_decision")
-    print(f"   ✓ Loan decisions: {meta['total']}")
+    actions_list = aira.list_actions(page=1, action_type="loan_decision")
+    print(f"   ✓ Loan decisions: {actions_list.total}")
 
     # Decorator — zero-code notarization
     @aira.trace(agent_id=AGENT_SLUG, action_type="risk_check")
@@ -212,15 +212,15 @@ def main():
     try:
         case = aira.run_case(
             details=f"Should we approve a €{APPLICATION['loan_amount_eur']:,} loan? Credit: {APPLICATION['credit_score']}, income: €{APPLICATION['annual_income_eur']:,}",
-            models=[MODEL_ID, "gpt-4o"],
+            models=[MODEL_ID, "gpt-5.2"],
         )
         consensus = case.get("consensus", {})
         print(f"   ✓ Decision: {consensus.get('decision', 'N/A')}")
         print(f"   ✓ Confidence: {consensus.get('confidence_score', 'N/A')}")
         print(f"   ✓ Human review: {'yes' if consensus.get('requires_human_review') else 'no'}")
 
-        cases, _ = aira.list_cases(page=1)
-        print(f"   ✓ Total cases: {_['total']}")
+        cases_list = aira.list_cases(page=1)
+        print(f"   ✓ Total cases: {cases_list.total}")
     except AiraError as e:
         print(f"   ⚠ Skipped: {e.message}")
     print()
@@ -239,14 +239,14 @@ def main():
     print(f"   ✓ Sealed: \"{package.title}\"")
     print(f"   ✓ Hash: {package.package_hash[:30]}...")
 
-    packages, _ = aira.list_evidence_packages(page=1)
-    print(f"   ✓ Total packages: {_['total']}")
+    packages_list = aira.list_evidence_packages(page=1)
+    print(f"   ✓ Total packages: {packages_list.total}")
 
     pkg = aira.get_evidence_package(str(package.id))
     print(f"   ✓ Retrieved: {pkg.title}")
 
     try:
-        tt = aira.time_travel(agent_id=AGENT_SLUG, point_in_time="2030-01-01T00:00:00Z")
+        tt = aira.time_travel(agent_slug=AGENT_SLUG, point_in_time="2030-01-01T00:00:00Z")
         print(f"   ✓ Time-travel: queried")
     except AiraError:
         print(f"   ✓ Time-travel: endpoint available")
@@ -281,8 +281,8 @@ def main():
     )
     print(f"   ✓ EU AI Act: {snapshot.status}")
 
-    snapshots, _ = aira.list_compliance_snapshots(page=1, framework="eu-ai-act")
-    print(f"   ✓ Snapshots: {_['total']}")
+    snapshots_list = aira.list_compliance_snapshots(page=1, framework="eu-ai-act")
+    print(f"   ✓ Snapshots: {snapshots_list.total}")
     print()
 
     # ══════════════════════════════════════════════════════════
@@ -301,8 +301,8 @@ def main():
         aira.escrow_release(account.id, amount=1500.00, description="Loan disbursed")
         print(f"   ✓ Released: €1,500")
 
-        accounts, _ = aira.list_escrow_accounts(page=1)
-        print(f"   ✓ Accounts: {_['total']}")
+        accounts_list = aira.list_escrow_accounts(page=1)
+        print(f"   ✓ Accounts: {accounts_list.total}")
     except AiraError as e:
         print(f"   ⚠ Skipped: {e.message}")
     print()

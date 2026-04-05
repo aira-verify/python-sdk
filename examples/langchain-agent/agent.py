@@ -20,7 +20,7 @@ trust_policy = {
 handler = AiraCallbackHandler(
     client=aira,
     agent_id="langchain-research-agent",
-    model_id="gpt-4o",
+    model_id="gpt-5.2",
     trust_policy=trust_policy,
 )
 
@@ -42,7 +42,7 @@ def summarize(text: str) -> str:
 
 # In a real app, you'd create a chain/agent here:
 # from langchain_openai import ChatOpenAI
-# llm = ChatOpenAI(model="gpt-4o")
+# llm = ChatOpenAI(model="gpt-5.2")
 # agent = create_tool_calling_agent(llm, [search_documents, summarize], prompt)
 # agent_executor = AgentExecutor(agent=agent, tools=[search_documents, summarize])
 # result = agent_executor.invoke(

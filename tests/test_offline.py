@@ -1,11 +1,11 @@
 """Tests for offline queue and offline-mode client behavior."""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 import httpx
 import pytest
 
-from aira import Aira
+from aira import Aira, AsyncAira
 from aira.client import AiraError
 from aira._offline import OfflineQueue, QueuedRequest
 
@@ -134,3 +134,48 @@ class TestOfflineModeClient:
         assert results[1]["_status"] == 400
         assert results[2]["action_id"] == "act-1"
         c.close()
+
+
+class TestAsyncOfflineMode:
+    """Tests for AsyncAira client in offline mode."""
+
+    @pytest.mark.asyncio
+    async def test_async_post_queues_when_offline(self):
+        async with AsyncAira(api_key="aira_test_xxx", base_url="http://test", offline=True) as c:
+            result = await c._post("/actions", {"action_type": "email_sent", "details": "Test offline"})
+            assert result["_offline"] is True
+            assert result["_queue_id"].startswith("offline_")
+            assert c._queue.pending_count == 1
+
+    @pytest.mark.asyncio
+    async def test_async_get_raises_offline(self):
+        async with AsyncAira(api_key="aira_test_xxx", base_url="http://test", offline=True) as c:
+            with pytest.raises(AiraError) as exc:
+                await c.list_actions()
+            assert exc.value.code == "OFFLINE"
+
+    @pytest.mark.asyncio
+    async def test_async_sync_flushes_queue(self):
+        c = AsyncAira(api_key="aira_test_xxx", base_url="http://test", offline=True)
+        await c._post("/actions", {"action_type": "email_sent", "details": "Test 1"})
+        await c._post("/actions", {"action_type": "email_sent", "details": "Test 2"})
+        assert c._queue.pending_count == 2
+
+        mock_resp = _resp(RECEIPT, 201)
+        with patch.object(c._client, "request", new_callable=AsyncMock, return_value=mock_resp):
+            results = await c.sync()
+        assert len(results) == 2
+        assert results[0]["action_id"] == "act-1"
+        assert c._queue.pending_count == 0
+        await c.close()
+
+    @pytest.mark.asyncio
+    async def test_async_queue_count(self):
+        async with AsyncAira(api_key="aira_test_xxx", base_url="http://test", offline=True) as c:
+            assert c._queue.pending_count == 0
+            await c._post("/actions", {"action_type": "a", "details": "1"})
+            assert c._queue.pending_count == 1
+            await c._post("/actions", {"action_type": "b", "details": "2"})
+            assert c._queue.pending_count == 2
+            await c._post("/actions", {"action_type": "c", "details": "3"})
+            assert c._queue.pending_count == 3

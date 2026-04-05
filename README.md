@@ -66,7 +66,7 @@ from aira import Aira
 from aira.extras.langchain import AiraCallbackHandler
 
 aira = Aira(api_key="aira_live_xxx")
-handler = AiraCallbackHandler(client=aira, agent_id="research-agent", model_id="gpt-4o")
+handler = AiraCallbackHandler(client=aira, agent_id="research-agent", model_id="gpt-5.2")
 
 # Every tool call and chain completion gets a signed receipt
 result = chain.invoke({"input": "Analyze Q1 revenue"}, config={"callbacks": [handler]})
@@ -297,7 +297,7 @@ Supported event types: `action.notarized`, `action.authorized`, `agent.registere
 
 ## Core SDK Methods
 
-All 45 methods on `Aira` (sync) and `AsyncAira` (async). Every write operation produces a cryptographic receipt.
+All 52 methods on `Aira` (sync) and `AsyncAira` (async). Every write operation produces a cryptographic receipt.
 
 | Category | Method | Description |
 |---|---|---|
@@ -325,15 +325,9 @@ All 45 methods on `Aira` (sync) and `AsyncAira` (async). Every write operation p
 | | `revoke_credential()` | Revoke agent's Verifiable Credential |
 | | `request_mutual_sign()` | Initiate mutual notarization with counterparty |
 | | `complete_mutual_sign()` | Complete mutual notarization (counterparty signs) |
-| | `get_mutual_sign_status()` | Check status of a mutual sign request |
 | | `get_reputation()` | Get agent reputation score and tier |
 | | `list_reputation_history()` | List reputation score history |
-| | `set_endpoint_policy()` | Set endpoint verification policy |
-| | `get_endpoint_policy()` | Get current endpoint policy |
 | | `resolve_did()` | Resolve any DID to its DID Document |
-| | `check_trust()` | Run full trust check against a counterparty |
-| | `list_credentials()` | List all credentials for an agent |
-| | `get_trust_bundle()` | Get DID + VC + reputation in one call |
 | **Cases** | `run_case()` | Multi-model consensus adjudication |
 | | `get_case()` | Retrieve case result |
 | | `list_cases()` | List cases |
@@ -458,28 +452,6 @@ except AiraError as e:
         raise
 ```
 
-#### Manage whitelist via API
-
-```python
-# List current whitelist
-entries = aira.list_endpoint_whitelist()
-
-# Add a new endpoint pattern
-entry = aira.add_endpoint_whitelist(
-    url_pattern="https://api.twilio.com/*",
-    name="Twilio API",
-)
-
-# List pending approval requests
-approvals = aira.list_endpoint_approvals()
-
-# Approve a pending request (admin only)
-aira.approve_endpoint(approval_id="eap_def456")
-
-# Delete a whitelist entry (admin only)
-aira.delete_endpoint_whitelist(entry_id="ewl_abc123")
-```
-
 ### Trust Policy in Integrations
 
 Pass a `trust_policy` to any framework integration to run automated trust checks before agent interactions:
@@ -490,7 +462,7 @@ from aira.extras.langchain import AiraCallbackHandler
 handler = AiraCallbackHandler(
     client=aira,
     agent_id="research-agent",
-    model_id="gpt-4o",
+    model_id="gpt-5.2",
     trust_policy={
         "verify_counterparty": True,   # resolve counterparty DID
         "min_reputation": 60,          # warn if reputation score below 60
