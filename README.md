@@ -511,7 +511,7 @@ Add to your MCP client config:
 
 ## CLI
 
-Command-line access to Aira's legal infrastructure. Every command interacts with the same cryptographic backend.
+Command-line access to Aira's governance infrastructure. Every command interacts with the same cryptographic backend.
 
 ```bash
 pip install aira-sdk[cli]

@@ -17,7 +17,7 @@ except ImportError:
 from aira import Aira, __version__
 
 console = Console()
-app = typer.Typer(name="aira", help="Aira CLI — legal infrastructure for AI agents", no_args_is_help=True)
+app = typer.Typer(name="aira", help="Aira CLI — AI governance infrastructure", no_args_is_help=True)
 agents_app = typer.Typer(help="Manage agents", no_args_is_help=True)
 actions_app = typer.Typer(help="Manage actions", no_args_is_help=True)
 snapshot_app = typer.Typer(help="Compliance snapshots", no_args_is_help=True)

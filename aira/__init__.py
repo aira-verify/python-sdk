@@ -1,4 +1,4 @@
-"""Aira SDK — legal infrastructure for AI agents.
+"""Aira SDK — AI governance infrastructure.
 
 Usage:
     from aira import Aira
