@@ -29,8 +29,6 @@ logger = logging.getLogger("aira")
 DEFAULT_BASE_URL = "https://api.airaproof.com"
 DEFAULT_TIMEOUT = 30.0
 MAX_DETAILS_LENGTH = 50_000
-MAX_RETRIES = 2
-RETRY_STATUS_CODES = {502, 503, 504}
 
 
 class AiraError(Exception):
@@ -77,8 +75,8 @@ def _validate_api_key(api_key: str) -> None:
         logger.warning("API key does not start with 'aira_live_' or 'aira_test_' — is this correct?")
 
 
-def _sanitize_details(text: str) -> str:
-    """Truncate details to max length and strip potential secrets."""
+def _truncate_details(text: str) -> str:
+    """Truncate details to max length."""
     if len(text) > MAX_DETAILS_LENGTH:
         text = text[:MAX_DETAILS_LENGTH] + "...[truncated]"
     return text
@@ -152,9 +150,15 @@ class Aira(_BaseMixin):
         return _handle_response(self._client.get(path, params=params))
 
     def _put(self, path: str, body: dict) -> dict:
+        if self._queue is not None:
+            qid = self._queue.enqueue("PUT", path, body)
+            return {"_offline": True, "_queue_id": qid}
         return _handle_response(self._client.put(path, json=body))
 
     def _delete(self, path: str) -> dict:
+        if self._queue is not None:
+            qid = self._queue.enqueue("DELETE", path, {})
+            return {"_offline": True, "_queue_id": qid}
         return _handle_response(self._client.delete(path))
 
     # ==================== Actions ====================
@@ -177,7 +181,7 @@ class Aira(_BaseMixin):
         """Notarize an agent action. Returns a cryptographic receipt."""
         body = _build_body(
             action_type=action_type,
-            details=_sanitize_details(details),
+            details=_truncate_details(details),
             agent_id=agent_id,
             agent_version=agent_version,
             model_id=model_id,
@@ -473,7 +477,7 @@ class Aira(_BaseMixin):
         items = self._queue.drain()
         results = []
         for item in items:
-            resp = self._client.request(item.method, f"{self.base_url}/api/v1{item.path}", json=item.body, headers=self._headers())
+            resp = self._client.request(item.method, item.path, json=item.body)
             if resp.status_code >= 400:
                 # Continue flushing but track failures
                 results.append({"_error": True, "_status": resp.status_code, "_queue_id": item.id})
@@ -610,9 +614,15 @@ class AsyncAira(_BaseMixin):
         return _handle_response(await self._client.get(path, params=params))
 
     async def _put(self, path: str, body: dict) -> dict:
+        if self._queue is not None:
+            qid = self._queue.enqueue("PUT", path, body)
+            return {"_offline": True, "_queue_id": qid}
         return _handle_response(await self._client.put(path, json=body))
 
     async def _delete(self, path: str) -> dict:
+        if self._queue is not None:
+            qid = self._queue.enqueue("DELETE", path, {})
+            return {"_offline": True, "_queue_id": qid}
         return _handle_response(await self._client.delete(path))
 
     # ==================== Actions ====================
@@ -621,24 +631,45 @@ class AsyncAira(_BaseMixin):
         self,
         action_type: str,
         details: str,
+        agent_id: str | None = None,
+        agent_version: str | None = None,
+        model_id: str | None = None,
+        model_version: str | None = None,
+        instruction_hash: str | None = None,
+        parent_action_id: str | None = None,
+        store_details: bool = False,
+        idempotency_key: str | None = None,
         require_approval: bool = False,
         approvers: list[str] | None = None,
-        **kwargs: Any,
     ) -> ActionReceipt:
+        """Notarize an agent action. Returns a cryptographic receipt."""
         body = _build_body(
             action_type=action_type,
-            details=_sanitize_details(details),
+            details=_truncate_details(details),
+            agent_id=agent_id,
+            agent_version=agent_version,
+            model_id=model_id,
+            model_version=model_version,
+            instruction_hash=instruction_hash,
+            parent_action_id=parent_action_id,
+            idempotency_key=idempotency_key,
             require_approval=require_approval or None,
             approvers=approvers,
-            **kwargs,
         )
+        if store_details:
+            body["store_details"] = True
         return _to_dataclass(ActionReceipt, await self._post("/actions", body))
 
     async def get_action(self, action_id: str) -> ActionDetail:
         return _to_dataclass(ActionDetail, await self._get(f"/actions/{action_id}"))
 
-    async def list_actions(self, page: int = 1, **filters: Any) -> PaginatedList:
-        return _paginated(await self._get("/actions", _build_body(page=page, **filters)))
+    async def list_actions(
+        self, page: int = 1, per_page: int = 20,
+        action_type: str | None = None, agent_id: str | None = None, status: str | None = None,
+    ) -> PaginatedList:
+        """List notarized actions with filters."""
+        params = _build_body(page=page, per_page=per_page, action_type=action_type, agent_id=agent_id, status=status)
+        return _paginated(await self._get("/actions", params))
 
     async def authorize_action(self, action_id: str) -> dict:
         return await self._post(f"/actions/{action_id}/authorize", {})
@@ -658,8 +689,19 @@ class AsyncAira(_BaseMixin):
 
     # ==================== Agents ====================
 
-    async def register_agent(self, agent_slug: str, display_name: str, **kwargs: Any) -> AgentDetail:
-        body = _build_body(agent_slug=agent_slug, display_name=display_name, **kwargs)
+    async def register_agent(
+        self,
+        agent_slug: str,
+        display_name: str,
+        description: str | None = None,
+        capabilities: list[str] | None = None,
+        public: bool = False,
+    ) -> AgentDetail:
+        """Register a new agent identity."""
+        body = _build_body(
+            agent_slug=agent_slug, display_name=display_name,
+            description=description, capabilities=capabilities, public=public,
+        )
         return _to_dataclass(AgentDetail, await self._post("/agents", body))
 
     async def get_agent(self, slug: str) -> AgentDetail:
@@ -671,8 +713,11 @@ class AsyncAira(_BaseMixin):
     async def update_agent(self, slug: str, **fields: Any) -> AgentDetail:
         return _to_dataclass(AgentDetail, await self._put(f"/agents/{slug}", _build_body(**fields)))
 
-    async def publish_version(self, slug: str, version: str, **kwargs: Any) -> AgentVersion:
-        body = _build_body(version=version, **kwargs)
+    async def publish_version(
+        self, slug: str, version: str, changelog: str | None = None,
+        model_id: str | None = None, instruction_hash: str | None = None, config_hash: str | None = None,
+    ) -> AgentVersion:
+        body = _build_body(version=version, changelog=changelog, model_id=model_id, instruction_hash=instruction_hash, config_hash=config_hash)
         return _to_dataclass(AgentVersion, await self._post(f"/agents/{slug}/versions", body))
 
     async def list_versions(self, slug: str) -> list[AgentVersion]:
@@ -712,8 +757,11 @@ class AsyncAira(_BaseMixin):
 
     # ==================== Evidence ====================
 
-    async def create_evidence_package(self, title: str, action_ids: list[str], **kwargs: Any) -> EvidencePackage:
-        body = _build_body(title=title, action_ids=action_ids, **kwargs)
+    async def create_evidence_package(
+        self, title: str, action_ids: list[str], description: str | None = None,
+        agent_slugs: list[str] | None = None,
+    ) -> EvidencePackage:
+        body = _build_body(title=title, action_ids=action_ids, description=description, agent_slugs=agent_slugs)
         return _to_dataclass(EvidencePackage, await self._post("/evidence/packages", body))
 
     async def list_evidence_packages(self, page: int = 1) -> PaginatedList:
@@ -722,8 +770,9 @@ class AsyncAira(_BaseMixin):
     async def get_evidence_package(self, package_id: str) -> EvidencePackage:
         return _to_dataclass(EvidencePackage, await self._get(f"/evidence/packages/{package_id}"))
 
-    async def time_travel(self, point_in_time: str, **kwargs: Any) -> dict:
-        return await self._post("/evidence/time-travel", _build_body(point_in_time=point_in_time, **kwargs))
+    async def time_travel(self, point_in_time: str, agent_slug: str | None = None, action_type: str | None = None) -> dict:
+        """Query actions as they existed at a point in time."""
+        return await self._post("/evidence/time-travel", _build_body(point_in_time=point_in_time, agent_slug=agent_slug, action_type=action_type))
 
     async def liability_chain(self, action_id: str, max_depth: int = 10) -> list[dict]:
         data = await self._get(f"/evidence/liability-chain/{action_id}", {"max_depth": max_depth})
@@ -731,8 +780,18 @@ class AsyncAira(_BaseMixin):
 
     # ==================== Estate ====================
 
-    async def set_agent_will(self, slug: str, **kwargs: Any) -> dict:
-        return await self._put(f"/estate/agents/{slug}/will", _build_body(**kwargs))
+    async def set_agent_will(
+        self, slug: str, successor_slug: str | None = None,
+        succession_policy: str = "transfer_to_successor",
+        data_retention_days: int | None = None,
+        notify_emails: list[str] | None = None,
+        instructions: str | None = None,
+    ) -> dict:
+        body = _build_body(
+            successor_slug=successor_slug, succession_policy=succession_policy,
+            data_retention_days=data_retention_days, notify_emails=notify_emails, instructions=instructions,
+        )
+        return await self._put(f"/estate/agents/{slug}/will", body)
 
     async def get_agent_will(self, slug: str) -> dict:
         return await self._get(f"/estate/agents/{slug}/will")
@@ -743,8 +802,10 @@ class AsyncAira(_BaseMixin):
     async def get_death_certificate(self, slug: str) -> dict:
         return await self._get(f"/estate/agents/{slug}/death-certificate")
 
-    async def create_compliance_snapshot(self, framework: str, **kwargs: Any) -> ComplianceSnapshot:
-        body = _build_body(framework=framework, **kwargs)
+    async def create_compliance_snapshot(
+        self, framework: str, agent_slug: str | None = None, findings: dict | None = None,
+    ) -> ComplianceSnapshot:
+        body = _build_body(framework=framework, agent_slug=agent_slug, findings=findings)
         return _to_dataclass(ComplianceSnapshot, await self._post("/estate/compliance", body))
 
     async def list_compliance_snapshots(self, page: int = 1, framework: str | None = None) -> PaginatedList:
@@ -752,8 +813,12 @@ class AsyncAira(_BaseMixin):
 
     # ==================== Escrow ====================
 
-    async def create_escrow_account(self, **kwargs: Any) -> EscrowAccount:
-        return _to_dataclass(EscrowAccount, await self._post("/escrow/accounts", _build_body(**kwargs)))
+    async def create_escrow_account(
+        self, purpose: str | None = None, currency: str = "EUR",
+        agent_id: str | None = None, counterparty_org_id: str | None = None,
+    ) -> EscrowAccount:
+        body = _build_body(purpose=purpose, currency=currency, agent_id=agent_id, counterparty_org_id=counterparty_org_id)
+        return _to_dataclass(EscrowAccount, await self._post("/escrow/accounts", body))
 
     async def list_escrow_accounts(self, page: int = 1) -> PaginatedList:
         return _paginated(await self._get("/escrow/accounts", {"page": page}))
@@ -761,16 +826,16 @@ class AsyncAira(_BaseMixin):
     async def get_escrow_account(self, account_id: str) -> EscrowAccount:
         return _to_dataclass(EscrowAccount, await self._get(f"/escrow/accounts/{account_id}"))
 
-    async def escrow_deposit(self, account_id: str, amount: float, **kwargs: Any) -> EscrowTransaction:
-        body = _build_body(amount=amount, **kwargs)
+    async def escrow_deposit(self, account_id: str, amount: float, description: str | None = None, reference_action_id: str | None = None) -> EscrowTransaction:
+        body = _build_body(amount=amount, description=description, reference_action_id=reference_action_id)
         return _to_dataclass(EscrowTransaction, await self._post(f"/escrow/accounts/{account_id}/deposit", body))
 
-    async def escrow_release(self, account_id: str, amount: float, **kwargs: Any) -> EscrowTransaction:
-        body = _build_body(amount=amount, **kwargs)
+    async def escrow_release(self, account_id: str, amount: float, description: str | None = None, reference_action_id: str | None = None) -> EscrowTransaction:
+        body = _build_body(amount=amount, description=description, reference_action_id=reference_action_id)
         return _to_dataclass(EscrowTransaction, await self._post(f"/escrow/accounts/{account_id}/release", body))
 
-    async def escrow_dispute(self, account_id: str, amount: float, description: str, **kwargs: Any) -> EscrowTransaction:
-        body = _build_body(amount=amount, description=description, **kwargs)
+    async def escrow_dispute(self, account_id: str, amount: float, description: str, reference_action_id: str | None = None) -> EscrowTransaction:
+        body = _build_body(amount=amount, description=description, reference_action_id=reference_action_id)
         return _to_dataclass(EscrowTransaction, await self._post(f"/escrow/accounts/{account_id}/dispute", body))
 
     # ==================== Chat ====================
@@ -864,7 +929,7 @@ class AsyncAira(_BaseMixin):
         items = self._queue.drain()
         results = []
         for item in items:
-            resp = await self._client.request(item.method, f"{self.base_url}/api/v1{item.path}", json=item.body, headers=self._headers())
+            resp = await self._client.request(item.method, item.path, json=item.body)
             if resp.status_code >= 400:
                 results.append({"_error": True, "_status": resp.status_code, "_queue_id": item.id})
             else:

@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from aira import Aira, AsyncAira, ActionReceipt, ActionDetail, AgentDetail, AgentVersion, EvidencePackage, ComplianceSnapshot, EscrowAccount, EscrowTransaction
-from aira.client import AiraError, _sanitize_details, _validate_api_key, MAX_DETAILS_LENGTH
+from aira.client import AiraError, _truncate_details, _validate_api_key, MAX_DETAILS_LENGTH
 
 
 # --- Helpers ---
@@ -35,10 +35,10 @@ class TestValidation:
             Aira(api_key="")
 
     def test_sanitize_truncates(self):
-        assert _sanitize_details("x" * (MAX_DETAILS_LENGTH + 100)).endswith("...[truncated]")
+        assert _truncate_details("x" * (MAX_DETAILS_LENGTH + 100)).endswith("...[truncated]")
 
     def test_sanitize_normal(self):
-        assert _sanitize_details("hello") == "hello"
+        assert _truncate_details("hello") == "hello"
 
 
 class TestSyncActions:
