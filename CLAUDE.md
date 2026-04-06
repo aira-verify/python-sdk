@@ -49,7 +49,7 @@ aira/
 - Use `_to_dataclass(cls, data)` to convert API responses to typed dataclasses
 - Paginated responses return `PaginatedList` dataclass
 - Public methods: named params with defaults, not `**kwargs`
-- Details are sanitized via `_sanitize_details()` — never send raw user content
+- Details are truncated via `_truncate_details()` — never send raw user content
 
 ### Types
 - All response types are `@dataclass` in `types.py`

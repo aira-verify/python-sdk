@@ -20,6 +20,7 @@ except ImportError:
 def create_server(api_key: str | None = None, base_url: str | None = None) -> Server:
     """Create an MCP server with Aira tools."""
     from aira import Aira
+    from aira.client import AiraError
 
     key = api_key or os.environ.get("AIRA_API_KEY", "")
     if not key:
@@ -147,8 +148,10 @@ def create_server(api_key: str | None = None, base_url: str | None = None) -> Se
                 return [TextContent(type="text", text=json.dumps(result, default=str))]
             else:
                 return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
-        except Exception as e:
-            return [TextContent(type="text", text=json.dumps({"error": str(e)}))]
+        except AiraError as e:
+            return [TextContent(type="text", text=json.dumps({"error": e.message, "code": e.code}))]
+        except Exception:
+            return [TextContent(type="text", text=json.dumps({"error": "Internal error", "code": "SDK_ERROR"}))]
 
     return server
 
@@ -159,6 +162,7 @@ def main():
     from mcp.server.stdio import stdio_server
     from mcp.server import InitializationOptions
     from mcp.server.lowlevel.server import NotificationOptions
+    from aira import __version__
 
     server = create_server()
 
@@ -166,7 +170,7 @@ def main():
         async with stdio_server() as (read_stream, write_stream):
             init_options = InitializationOptions(
                 server_name="aira",
-                server_version="0.2.1",
+                server_version=__version__,
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),
                     experimental_capabilities={},

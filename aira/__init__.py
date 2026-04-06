@@ -28,6 +28,8 @@ from aira.types import (
     ComplianceSnapshot,
     EscrowAccount,
     EscrowTransaction,
+    VerifyResult,
+    PaginatedList,
 )
 
 __version__ = "0.4.0"
@@ -46,4 +48,6 @@ __all__ = [
     "ComplianceSnapshot",
     "EscrowAccount",
     "EscrowTransaction",
+    "VerifyResult",
+    "PaginatedList",
 ]

@@ -236,7 +236,7 @@ class TestMCPServer(unittest.TestCase):
         data = json.loads(result[0].text)
         self.assertEqual(data["status"], "pending")
 
-    # 9. error propagation returns error JSON
+    # 9. error propagation returns safe error JSON (no raw exception leakage)
     def test_error_returns_error_json(self):
         server, mock_client, _ = self._create_server()
         mock_client.notarize.side_effect = RuntimeError("API exploded")
@@ -246,7 +246,8 @@ class TestMCPServer(unittest.TestCase):
         ))
         data = json.loads(result[0].text)
         self.assertIn("error", data)
-        self.assertIn("API exploded", data["error"])
+        self.assertEqual(data["error"], "Internal error")
+        self.assertEqual(data["code"], "SDK_ERROR")
 
     # 10. main entry point is callable
     def test_main_is_callable(self):
