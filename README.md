@@ -320,13 +320,36 @@ Configure default approvers in the [dashboard](https://app.airaproof.com/dashboa
 
 ### Automatic Policy Evaluation
 
-Org admins can configure policies in the dashboard that automatically evaluate every action. Three modes:
+Org admins configure policies in the dashboard — your code doesn't change. Every `notarize()` call is automatically evaluated against active policies before the receipt is issued.
 
-- **Rules**: Deterministic conditions (e.g., all wire transfers require approval)
-- **AI**: Single LLM evaluates action against a natural language policy
-- **Consensus**: Multiple LLMs evaluate independently — disagreement triggers human review
+Three evaluation modes:
 
-Every policy evaluation produces a cryptographic receipt. No SDK changes needed — policies are evaluated server-side on every `notarize()` call.
+- **Rules**: Deterministic conditions — instant, no LLM call
+- **AI**: Single LLM evaluates action against a natural language policy (1-5s)
+- **Consensus**: Multiple LLMs evaluate independently — disagreement triggers human review (3-10s)
+
+```python
+# Your code stays the same — policies evaluate automatically
+receipt = aira.notarize(
+    action_type="wire_transfer",
+    details="Transfer $50,000 to vendor account",
+    agent_id="billing-agent",
+)
+
+# If a policy triggers "require_approval":
+print(receipt.status)             # "pending_approval"
+print(receipt.policy_evaluation)  # {"policy_name": "Wire transfers need approval", "decision": "require_approval", ...}
+
+# If a policy triggers "deny":
+from aira import AiraError
+try:
+    aira.notarize(action_type="data_deletion", details="Delete customer records")
+except AiraError as e:
+    print(e.code)     # "POLICY_DENIED"
+    print(e.message)  # "Action denied by policy 'Block deletions': ..."
+```
+
+Every policy evaluation produces a cryptographic receipt — proof the policy was checked. The SDK `require_approval=True` override still works and skips policy evaluation entirely.
 
 Configure policies at [Settings → Policies](https://app.airaproof.com/dashboard/policies).
 
