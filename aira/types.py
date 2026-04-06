@@ -17,6 +17,7 @@ class ActionReceipt:
     timestamp_token: str | None = None
     status: str = "notarized"
     warnings: list[str] | None = None
+    policy_evaluation: dict | None = None  # {policy_id, policy_name, decision, reasoning, confidence}
 
 
 @dataclass

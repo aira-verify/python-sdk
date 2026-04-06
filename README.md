@@ -318,6 +318,18 @@ The approver clicks "Approve" in the email → receipt is minted with Ed25519 si
 
 Configure default approvers in the [dashboard](https://app.airaproof.com/dashboard/settings/approvers) or via the `/approvers` API.
 
+### Automatic Policy Evaluation
+
+Org admins can configure policies in the dashboard that automatically evaluate every action. Three modes:
+
+- **Rules**: Deterministic conditions (e.g., all wire transfers require approval)
+- **AI**: Single LLM evaluates action against a natural language policy
+- **Consensus**: Multiple LLMs evaluate independently — disagreement triggers human review
+
+Every policy evaluation produces a cryptographic receipt. No SDK changes needed — policies are evaluated server-side on every `notarize()` call.
+
+Configure policies at [Settings → Policies](https://app.airaproof.com/dashboard/policies).
+
 ---
 
 ## Async Support
