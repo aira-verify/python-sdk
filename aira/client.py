@@ -59,21 +59,14 @@ class AiraError(Exception):
         self.details = details or {}
         super().__init__(f"[{code}] {message}")
 
-    @property
-    def status(self) -> int:
-        """Deprecated alias for ``status_code``. Prefer ``status_code``."""
-        return self.status_code
-
 
 def _handle_response(resp: httpx.Response) -> dict:
     if resp.status_code >= 400:
         try:
             body = resp.json()
         except Exception:
-            body = {"error": resp.text, "code": "UNKNOWN"}
-        # Backend returns the human-readable text under "error". The spec
-        # refers to it as ``message`` on the SDK side; surface both.
-        message = body.get("message") or body.get("error") or resp.text
+            body = {"message": resp.text, "code": "UNKNOWN"}
+        message = body.get("message") or resp.text
         raise AiraError(
             resp.status_code,
             body.get("code", "UNKNOWN"),

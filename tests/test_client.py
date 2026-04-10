@@ -181,7 +181,7 @@ class TestAuthorize:
     def test_authorize_policy_denied_raises_with_details(self):
         err_body = {
             "code": "POLICY_DENIED",
-            "error": "Action denied by policy 'Block wire transfers'",
+            "message": "Action denied by policy 'Block wire transfers'",
             "details": {"action_id": "act-1", "policy_id": "pol-1"},
         }
         with patch.object(self.c._client, "post", return_value=_resp(err_body, 403)):
@@ -195,7 +195,7 @@ class TestAuthorize:
     def test_authorize_endpoint_not_whitelisted_raises(self):
         err_body = {
             "code": "ENDPOINT_NOT_WHITELISTED",
-            "error": "Endpoint not whitelisted",
+            "message": "Endpoint not whitelisted",
             "details": {"approval_id": "req-1"},
         }
         with patch.object(self.c._client, "post", return_value=_resp(err_body, 403)):
@@ -208,7 +208,7 @@ class TestAuthorize:
         assert ei.value.code == "ENDPOINT_NOT_WHITELISTED"
 
     def test_authorize_duplicate_request(self):
-        err_body = {"code": "DUPLICATE_REQUEST", "error": "idempotency key already used"}
+        err_body = {"code": "DUPLICATE_REQUEST", "message": "idempotency key already used"}
         with patch.object(self.c._client, "post", return_value=_resp(err_body, 409)):
             with pytest.raises(AiraError) as ei:
                 self.c.authorize(
@@ -282,7 +282,7 @@ class TestNotarize:
     def test_notarize_invalid_state_raises(self):
         err_body = {
             "code": "INVALID_STATE",
-            "error": "Action is not in authorized or approved state",
+            "message": "Action is not in authorized or approved state",
         }
         with patch.object(self.c._client, "post", return_value=_resp(err_body, 409)):
             with pytest.raises(AiraError) as ei:
@@ -544,20 +544,20 @@ class TestErrors:
         self.c.close()
 
     def test_404(self):
-        with patch.object(self.c._client, "get", return_value=_resp({"error": "Not found", "code": "NOT_FOUND"}, 404)):
+        with patch.object(self.c._client, "get", return_value=_resp({"message": "Not found", "code": "NOT_FOUND"}, 404)):
             with pytest.raises(AiraError) as e:
                 self.c.get_action("bad")
             assert e.value.status_code == 404
             assert e.value.message == "Not found"
 
     def test_429(self):
-        with patch.object(self.c._client, "post", return_value=_resp({"error": "Rate limited", "code": "RATE_LIMIT_EXCEEDED"}, 429)):
+        with patch.object(self.c._client, "post", return_value=_resp({"message": "Rate limited", "code": "RATE_LIMIT_EXCEEDED"}, 429)):
             with pytest.raises(AiraError) as e:
                 self.c.authorize(action_type="x", details="y")
             assert e.value.status_code == 429
 
     def test_500(self):
-        with patch.object(self.c._client, "get", return_value=_resp({"error": "Internal", "code": "INTERNAL"}, 500)):
+        with patch.object(self.c._client, "get", return_value=_resp({"message": "Internal", "code": "INTERNAL"}, 500)):
             with pytest.raises(AiraError):
                 self.c.get_agent("x")
 
@@ -610,7 +610,7 @@ class TestAsync:
     @pytest.mark.asyncio
     async def test_authorize_policy_denied(self):
         async with AsyncAira(api_key="aira_live_test", base_url="http://test") as c:
-            err = {"code": "POLICY_DENIED", "error": "denied", "details": {"action_id": "act-1", "policy_id": "pol-1"}}
+            err = {"code": "POLICY_DENIED", "message": "denied", "details": {"action_id": "act-1", "policy_id": "pol-1"}}
             with patch.object(c._client, "post", return_value=_resp(err, 403)):
                 with pytest.raises(AiraError) as ei:
                     await c.authorize(action_type="x", details="y")
