@@ -34,26 +34,35 @@ class AiraError(Exception):
     """Aira API error.
 
     Attributes:
-        status: HTTP status code.
+        status_code: HTTP status code from the backend response.
         code: Error code string (e.g. ``"POLICY_DENIED"``, ``"NOT_FOUND"``).
-        message: Human-readable error message.
+        message: Human-readable error message from the backend.
         details: Optional dict with additional context from the backend.
             For ``POLICY_DENIED`` errors this includes ``action_id`` and
             ``policy_id`` of the policy that denied the action.
+
+    There is a single error type — catch ``AiraError`` and branch on
+    ``e.code`` (``"POLICY_DENIED"``, ``"INVALID_STATE"``, etc.). There are
+    no subclasses per error code.
     """
 
     def __init__(
         self,
-        status: int,
+        status_code: int,
         code: str,
         message: str,
         details: dict | None = None,
     ) -> None:
-        self.status = status
+        self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details or {}
         super().__init__(f"[{code}] {message}")
+
+    @property
+    def status(self) -> int:
+        """Deprecated alias for ``status_code``. Prefer ``status_code``."""
+        return self.status_code
 
 
 def _handle_response(resp: httpx.Response) -> dict:
@@ -62,10 +71,13 @@ def _handle_response(resp: httpx.Response) -> dict:
             body = resp.json()
         except Exception:
             body = {"error": resp.text, "code": "UNKNOWN"}
+        # Backend returns the human-readable text under "error". The spec
+        # refers to it as ``message`` on the SDK side; surface both.
+        message = body.get("message") or body.get("error") or resp.text
         raise AiraError(
             resp.status_code,
             body.get("code", "UNKNOWN"),
-            body.get("error", resp.text),
+            message,
             details=body.get("details"),
         )
     if resp.status_code == 204:

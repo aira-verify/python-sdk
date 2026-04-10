@@ -188,8 +188,9 @@ class TestAuthorize:
             with pytest.raises(AiraError) as ei:
                 self.c.authorize(action_type="wire_transfer", details="Send EUR 75K")
         assert ei.value.code == "POLICY_DENIED"
-        assert ei.value.status == 403
+        assert ei.value.status_code == 403
         assert ei.value.details == {"action_id": "act-1", "policy_id": "pol-1"}
+        assert ei.value.message.startswith("Action denied by policy")
 
     def test_authorize_endpoint_not_whitelisted_raises(self):
         err_body = {
@@ -215,7 +216,7 @@ class TestAuthorize:
                     details="Send EUR 75K",
                     idempotency_key="dup",
                 )
-        assert ei.value.status == 409
+        assert ei.value.status_code == 409
         assert ei.value.code == "DUPLICATE_REQUEST"
 
     def test_authorize_sends_require_approval_when_true(self):
@@ -546,13 +547,14 @@ class TestErrors:
         with patch.object(self.c._client, "get", return_value=_resp({"error": "Not found", "code": "NOT_FOUND"}, 404)):
             with pytest.raises(AiraError) as e:
                 self.c.get_action("bad")
-            assert e.value.status == 404
+            assert e.value.status_code == 404
+            assert e.value.message == "Not found"
 
     def test_429(self):
         with patch.object(self.c._client, "post", return_value=_resp({"error": "Rate limited", "code": "RATE_LIMIT_EXCEEDED"}, 429)):
             with pytest.raises(AiraError) as e:
                 self.c.authorize(action_type="x", details="y")
-            assert e.value.status == 429
+            assert e.value.status_code == 429
 
     def test_500(self):
         with patch.object(self.c._client, "get", return_value=_resp({"error": "Internal", "code": "INTERNAL"}, 500)):
@@ -564,7 +566,7 @@ class TestErrors:
         with patch.object(self.c._client, "get", return_value=resp):
             with pytest.raises(AiraError) as e:
                 self.c.get_action("x")
-            assert e.value.status == 502
+            assert e.value.status_code == 502
 
 
 class TestContextManager:
