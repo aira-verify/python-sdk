@@ -1,68 +1,119 @@
-"""Tests for AWS Bedrock integration — aira.extras.bedrock."""
+"""Tests for AWS Bedrock integration — real pre-execution gate."""
 from __future__ import annotations
+
 from unittest.mock import MagicMock
+
 import pytest
 
-from aira.extras.bedrock import AiraBedrockHandler
+from aira.extras.bedrock import AiraBedrockHandler, AiraInvocationDenied
+
+
+def _auth(status: str = "authorized", action_id: str = "act-1"):
+    a = MagicMock()
+    a.status = status
+    a.action_id = action_id
+    return a
 
 
 @pytest.fixture
 def mock_client():
     client = MagicMock()
-    client.notarize = MagicMock()
+    client.authorize.return_value = _auth("authorized")
     return client
 
 
 class TestAiraBedrockHandler:
-    def test_wrap_invoke_model_calls_original_and_notarizes(self, mock_client):
+    def test_wrap_invoke_model_authorizes_then_delegates_then_notarizes(self, mock_client):
         bedrock = MagicMock()
         bedrock.invoke_model = MagicMock(return_value={"body": "resp"})
         handler = AiraBedrockHandler(mock_client, agent_id="a1")
         wrapped = handler.wrap_invoke_model(bedrock)
         result = wrapped(modelId="anthropic.claude-v2")
-        assert result == {"body": "resp"}
-        bedrock.invoke_model.assert_called_once_with(modelId="anthropic.claude-v2")
-        call_kwargs = mock_client.notarize.call_args[1]
-        assert call_kwargs["action_type"] == "model_invoked"
-        assert "anthropic.claude-v2" in call_kwargs["details"]
 
-    def test_wrap_invoke_agent_calls_original_and_notarizes(self, mock_client):
+        assert result == {"body": "resp"}
+
+        # Authorize called before original invocation
+        mock_client.authorize.assert_called_once()
+        ak = mock_client.authorize.call_args[1]
+        assert ak["action_type"] == "model_invoked"
+        assert "anthropic.claude-v2" in ak["details"]
+
+        bedrock.invoke_model.assert_called_once_with(modelId="anthropic.claude-v2")
+
+        # Notarize called with completed
+        mock_client.notarize.assert_called_once()
+        nk = mock_client.notarize.call_args[1]
+        assert nk["outcome"] == "completed"
+
+    def test_wrap_invoke_agent_authorizes_then_notarizes(self, mock_client):
         bedrock_agent = MagicMock()
         bedrock_agent.invoke_agent = MagicMock(return_value={"completion": "ok"})
         handler = AiraBedrockHandler(mock_client, agent_id="a1")
         wrapped = handler.wrap_invoke_agent(bedrock_agent)
         result = wrapped(agentId="AGENT123")
+
         assert result == {"completion": "ok"}
-        call_kwargs = mock_client.notarize.call_args[1]
-        assert call_kwargs["action_type"] == "agent_invoked"
-        assert "AGENT123" in call_kwargs["details"]
+        ak = mock_client.authorize.call_args[1]
+        assert ak["action_type"] == "agent_invoked"
+        assert "AGENT123" in ak["details"]
+        mock_client.notarize.assert_called_once()
+
+    def test_policy_denied_aborts_invoke(self, mock_client):
+        err = Exception("denied")
+        err.code = "POLICY_DENIED"
+        err.message = "Blocked"
+        mock_client.authorize.side_effect = err
+
+        bedrock = MagicMock()
+        bedrock.invoke_model = MagicMock()
+        handler = AiraBedrockHandler(mock_client, agent_id="a1")
+        wrapped = handler.wrap_invoke_model(bedrock)
+        with pytest.raises(AiraInvocationDenied) as ei:
+            wrapped(modelId="m1")
+        assert ei.value.code == "POLICY_DENIED"
+        bedrock.invoke_model.assert_not_called()
+        mock_client.notarize.assert_not_called()
+
+    def test_pending_approval_aborts_invoke(self, mock_client):
+        mock_client.authorize.return_value = _auth("pending_approval")
+        bedrock = MagicMock()
+        bedrock.invoke_model = MagicMock()
+        handler = AiraBedrockHandler(mock_client, agent_id="a1")
+        wrapped = handler.wrap_invoke_model(bedrock)
+        with pytest.raises(AiraInvocationDenied) as ei:
+            wrapped(modelId="m1")
+        assert ei.value.code == "PENDING_APPROVAL"
+        bedrock.invoke_model.assert_not_called()
+
+    def test_bedrock_exception_notarized_as_failed(self, mock_client):
+        bedrock = MagicMock()
+        bedrock.invoke_model = MagicMock(side_effect=RuntimeError("bedrock down"))
+        handler = AiraBedrockHandler(mock_client, agent_id="a1")
+        wrapped = handler.wrap_invoke_model(bedrock)
+        with pytest.raises(RuntimeError):
+            wrapped(modelId="m1")
+        mock_client.notarize.assert_called_once()
+        nk = mock_client.notarize.call_args[1]
+        assert nk["outcome"] == "failed"
+        assert "bedrock down" in nk["outcome_details"]
 
     def test_agent_id_forwarded(self, mock_client):
+        bedrock = MagicMock()
+        bedrock.invoke_model = MagicMock(return_value={})
         handler = AiraBedrockHandler(mock_client, agent_id="my-agent")
-        handler.notarize_invocation("claude-v2")
-        assert mock_client.notarize.call_args[1]["agent_id"] == "my-agent"
+        wrapped = handler.wrap_invoke_model(bedrock)
+        wrapped(modelId="m1")
+        assert mock_client.authorize.call_args[1]["agent_id"] == "my-agent"
 
-    def test_non_blocking_on_notarize_failure(self, mock_client):
-        mock_client.notarize.side_effect = RuntimeError("API down")
+    def test_notarize_failure_non_blocking(self, mock_client):
+        mock_client.notarize.side_effect = RuntimeError("fail")
+        bedrock = MagicMock()
+        bedrock.invoke_model = MagicMock(return_value={"ok": True})
         handler = AiraBedrockHandler(mock_client, agent_id="a1")
-        handler.notarize_invocation("claude-v2")  # Should not raise
-
-    def test_details_truncated_to_5000(self, mock_client):
-        handler = AiraBedrockHandler(mock_client, agent_id="a1")
-        handler.notarize_invocation("m1", details="x" * 10000)
-        details = mock_client.notarize.call_args[1]["details"]
-        assert len(details) <= 5000
-
-    def test_notarize_invocation_default_details(self, mock_client):
-        handler = AiraBedrockHandler(mock_client, agent_id="a1")
-        handler.notarize_invocation("anthropic.claude-v2")
-        details = mock_client.notarize.call_args[1]["details"]
-        assert "anthropic.claude-v2" in details
-
-    def test_notarize_invocation_custom_details(self, mock_client):
-        handler = AiraBedrockHandler(mock_client, agent_id="a1")
-        handler.notarize_invocation("m1", details="Custom invocation context")
-        assert mock_client.notarize.call_args[1]["details"] == "Custom invocation context"
+        wrapped = handler.wrap_invoke_model(bedrock)
+        # Original call succeeds; notarize failure should not propagate.
+        result = wrapped(modelId="m1")
+        assert result == {"ok": True}
 
     def test_wrap_invoke_model_unknown_model_id(self, mock_client):
         bedrock = MagicMock()
@@ -70,77 +121,12 @@ class TestAiraBedrockHandler:
         handler = AiraBedrockHandler(mock_client, agent_id="a1")
         wrapped = handler.wrap_invoke_model(bedrock)
         wrapped()  # No modelId kwarg
-        assert "unknown" in mock_client.notarize.call_args[1]["details"]
+        assert "unknown" in mock_client.authorize.call_args[1]["details"]
 
     def test_wrap_invoke_agent_unknown_agent_id(self, mock_client):
         bedrock_agent = MagicMock()
         bedrock_agent.invoke_agent = MagicMock(return_value={})
         handler = AiraBedrockHandler(mock_client, agent_id="a1")
         wrapped = handler.wrap_invoke_agent(bedrock_agent)
-        wrapped()  # No agentId kwarg
-        assert "unknown" in mock_client.notarize.call_args[1]["details"]
-
-    def test_wrap_invoke_model_non_blocking_on_failure(self, mock_client):
-        mock_client.notarize.side_effect = RuntimeError("fail")
-        bedrock = MagicMock()
-        bedrock.invoke_model = MagicMock(return_value={"ok": True})
-        handler = AiraBedrockHandler(mock_client, agent_id="a1")
-        wrapped = handler.wrap_invoke_model(bedrock)
-        result = wrapped(modelId="m1")
-        assert result == {"ok": True}  # Original call still succeeds
-
-    def test_trust_policy_enriches_details(self, mock_client):
-        handler = AiraBedrockHandler(mock_client, agent_id="a1", trust_policy={
-            "verify_counterparty": True,
-            "min_reputation": 60,
-        })
-        mock_client.get_agent_did.return_value = {"did": "did:web:airaproof.com:agents:model"}
-        mock_client.get_reputation.return_value = {"score": 85, "tier": "gold"}
-        handler.notarize_invocation("anthropic.claude-v2")
-        details = mock_client.notarize.call_args[1]["details"]
-        assert "trust:" in details
-        assert '"did_resolved": true' in details
-        assert '"reputation_score": 85' in details
-
-    def test_trust_policy_blocks_revoked_vc(self, mock_client):
-        handler = AiraBedrockHandler(mock_client, agent_id="a1", trust_policy={
-            "verify_counterparty": True,
-            "require_valid_vc": True,
-            "block_revoked_vc": True,
-        })
-        mock_client.get_agent_did.return_value = {"did": "did:web:bad"}
-        mock_client.get_agent_credential.return_value = {"id": "vc_1"}
-        mock_client.verify_credential.return_value = {"valid": False}
-        handler.notarize_invocation("bad-model")
-        mock_client.notarize.assert_not_called()
-
-    def test_trust_policy_doesnt_block_unregistered(self, mock_client):
-        handler = AiraBedrockHandler(mock_client, agent_id="a1", trust_policy={
-            "verify_counterparty": True,
-            "block_unregistered": False,
-        })
-        mock_client.get_agent_did.side_effect = Exception("Not found")
-        handler.notarize_invocation("unknown-model")
-        mock_client.notarize.assert_called_once()
-        details = mock_client.notarize.call_args[1]["details"]
-        assert '"did_resolved": false' in details
-
-    def test_trust_policy_includes_reputation(self, mock_client):
-        handler = AiraBedrockHandler(mock_client, agent_id="a1", trust_policy={
-            "verify_counterparty": True,
-            "min_reputation": 80,
-        })
-        mock_client.get_agent_did.return_value = {"did": "did:web:low"}
-        mock_client.get_reputation.return_value = {"score": 45, "tier": "bronze"}
-        handler.notarize_invocation("low-model")
-        details = mock_client.notarize.call_args[1]["details"]
-        assert "reputation_warning" in details
-        assert "Below minimum" in details
-
-    def test_no_trust_policy_no_checks(self, mock_client):
-        handler = AiraBedrockHandler(mock_client, agent_id="a1")
-        handler.notarize_invocation("claude-v2")
-        mock_client.notarize.assert_called_once()
-        details = mock_client.notarize.call_args[1]["details"]
-        assert "trust:" not in details
-        mock_client.get_agent_did.assert_not_called()
+        wrapped()
+        assert "unknown" in mock_client.authorize.call_args[1]["details"]

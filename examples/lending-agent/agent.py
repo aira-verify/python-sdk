@@ -1,8 +1,8 @@
 """
-Aira Lending Agent — Complete SDK example.
+Aira Lending Agent — Complete SDK example (two-step authorize + notarize flow).
 
-Covers every feature of aira-sdk: notarization, agents, cases, evidence,
-estate, escrow, chat, decorator, async, verification, and more.
+Covers every feature of aira-sdk: authorization gating, notarization,
+agents, cases, evidence, estate, escrow, chat, verification, async support.
 
 Usage:
     pip install aira-sdk anthropic
@@ -84,6 +84,11 @@ def evaluate_loan(application: dict) -> dict:
     return json.loads(text[text.find("{"):text.rfind("}") + 1])
 
 
+def send_loan_email(applicant: str, decision: str) -> str:
+    """Stub: pretend to send an email. Returns a fake provider ref."""
+    return f"ses-msg-{hashlib.sha1(f'{applicant}:{decision}'.encode()).hexdigest()[:12]}"
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -94,6 +99,7 @@ def main():
     print("=" * 60 + "\n")
 
     aira = Aira(api_key=AIRA_API_KEY, base_url=AIRA_BASE_URL)
+    instruction_hash = f"sha256:{hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()}"
 
     # ══════════════════════════════════════════════════════════
     # 1. AGENT REGISTRY — register, version, update, list
@@ -109,98 +115,103 @@ def main():
             capabilities=["credit_scoring", "risk_assessment", "loan_evaluation"],
             public=True,
         )
-        print(f"   ✓ Registered: {agent.agent_slug}")
+        print(f"   - Registered: {agent.agent_slug}")
 
         version = aira.publish_version(
             slug=AGENT_SLUG,
             version=AGENT_VERSION,
             model_id=MODEL_ID,
-            instruction_hash=f"sha256:{hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()}",
-            changelog="Initial release — single-model evaluation",
+            instruction_hash=instruction_hash,
+            changelog="Initial release - single-model evaluation",
         )
-        print(f"   ✓ Version: {version.version}")
+        print(f"   - Version: {version.version}")
     except AiraError as e:
         if "EXISTS" in (e.code or ""):
-            print(f"   ✓ Already registered (skipped)")
+            print(f"   - Already registered (skipped)")
         else:
             raise
 
-    # Update agent
     try:
         aira.update_agent(AGENT_SLUG, description="AI-powered loan evaluation v1.0")
-        print(f"   ✓ Updated description")
+        print(f"   - Updated description")
     except AiraError:
         pass
 
-    # List agents
     agents = aira.list_agents(page=1)
-    print(f"   ✓ {agents.total} agent(s) in registry")
-
-    # Get agent detail + versions
+    print(f"   - {agents.total} agent(s) in registry")
     detail = aira.get_agent(AGENT_SLUG)
-    print(f"   ✓ Status: {detail.status}")
+    print(f"   - Status: {detail.status}")
     versions = aira.list_versions(AGENT_SLUG)
-    print(f"   ✓ {len(versions)} version(s)")
+    print(f"   - {len(versions)} version(s)")
     print()
 
     # ══════════════════════════════════════════════════════════
-    # 2. NOTARIZATION — notarize, chain, decorator, list
+    # 2. GATED ACTION — authorize BEFORE executing, notarize AFTER
     # ══════════════════════════════════════════════════════════
 
-    print("2. Action Notarization")
+    print("2. Loan Decision (gated by Aira)")
     print("-" * 40)
 
-    evaluation = evaluate_loan(APPLICATION)
-    decision = evaluation["decision"]
-    confidence = evaluation["confidence"]
-    print(f"   AI decision: {decision} (confidence: {confidence})")
-
-    # Notarize with idempotency key
-    receipt = aira.notarize(
+    # Step 1: ASK for permission to evaluate this loan.
+    auth = aira.authorize(
         action_type="loan_decision",
         details=json.dumps({
             "applicant": APPLICATION["applicant"],
             "amount": APPLICATION["loan_amount_eur"],
-            "decision": decision,
-            "confidence": confidence,
         }),
         agent_id=AGENT_SLUG,
         model_id=MODEL_ID,
-        instruction_hash=f"sha256:{hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()}",
+        instruction_hash=instruction_hash,
         idempotency_key=f"loan-{APPLICATION['applicant'].replace(' ', '-').lower()}",
     )
-    print(f"   ✓ Notarized: {receipt.action_id[:16]}...")
-    print(f"   ✓ Signature: {receipt.signature[:30]}...")
+    print(f"   - authorize() -> status={auth.status} action_id={auth.action_id[:16]}...")
+
+    if auth.status == "pending_approval":
+        print("   - Held for human review. Exiting — no decision made.")
+        aira.close()
+        return
+
+    # Step 2: now that we're authorized, actually run the evaluation.
+    evaluation = evaluate_loan(APPLICATION)
+    decision = evaluation["decision"]
+    confidence = evaluation["confidence"]
+    print(f"   - AI decision: {decision} (confidence: {confidence})")
+
+    # Step 3: report the outcome — this mints the cryptographic receipt.
+    receipt = aira.notarize(
+        action_id=auth.action_id,
+        outcome="completed",
+        outcome_details=json.dumps({"decision": decision, "confidence": confidence}),
+    )
+    print(f"   - notarize() -> status={receipt.status}")
+    print(f"   - Signature: {receipt.signature[:30] if receipt.signature else 'none'}...")
     action_ids = [receipt.action_id]
 
-    # Chain of custody — email as child action
-    email_receipt = aira.notarize(
+    # Chain of custody — email as child action (also gated).
+    email_auth = aira.authorize(
         action_type="email_sent",
         details=json.dumps({"to": APPLICATION["email"], "subject": f"Loan {decision}"}),
         agent_id=AGENT_SLUG,
         model_id=MODEL_ID,
         parent_action_id=receipt.action_id,
     )
-    print(f"   ✓ Chained: {email_receipt.action_id[:16]}...")
-    action_ids.append(email_receipt.action_id)
+    if email_auth.status == "authorized":
+        ref = send_loan_email(APPLICATION["applicant"], decision)
+        aira.notarize(
+            action_id=email_auth.action_id,
+            outcome="completed",
+            outcome_details=f"sent via SES, ref={ref}",
+        )
+        print(f"   - Chained email: {email_auth.action_id[:16]}... (ref={ref})")
+        action_ids.append(email_auth.action_id)
 
-    # Get action + chain
+    # Listing / chain / filter
     action = aira.get_action(receipt.action_id)
-    print(f"   ✓ Type: {action.action_type}")
+    print(f"   - Action type: {action.action_type}")
     chain = aira.get_action_chain(receipt.action_id)
-    print(f"   ✓ Chain: {len(chain)} action(s)")
-
-    # List with filter
+    print(f"   - Chain: {len(chain)} action(s)")
     actions_list = aira.list_actions(page=1, action_type="loan_decision")
-    print(f"   ✓ Loan decisions: {actions_list.total}")
-
-    # Decorator — zero-code notarization
-    @aira.trace(agent_id=AGENT_SLUG, action_type="risk_check")
-    def check_credit(score: int) -> str:
-        return "good" if score > 700 else "poor"
-
-    risk = check_credit(APPLICATION["credit_score"])
-    print(f"   ✓ @trace: credit={risk} (auto-notarized)")
+    print(f"   - Loan decisions: {actions_list.total}")
     print()
 
     # ══════════════════════════════════════════════════════════
@@ -211,18 +222,18 @@ def main():
     print("-" * 40)
     try:
         case = aira.run_case(
-            details=f"Should we approve a €{APPLICATION['loan_amount_eur']:,} loan? Credit: {APPLICATION['credit_score']}, income: €{APPLICATION['annual_income_eur']:,}",
+            details=f"Should we approve a EUR {APPLICATION['loan_amount_eur']:,} loan? Credit: {APPLICATION['credit_score']}, income: EUR {APPLICATION['annual_income_eur']:,}",
             models=[MODEL_ID, "gpt-5.2"],
         )
         consensus = case.get("consensus", {})
-        print(f"   ✓ Decision: {consensus.get('decision', 'N/A')}")
-        print(f"   ✓ Confidence: {consensus.get('confidence_score', 'N/A')}")
-        print(f"   ✓ Human review: {'yes' if consensus.get('requires_human_review') else 'no'}")
+        print(f"   - Decision: {consensus.get('decision', 'N/A')}")
+        print(f"   - Confidence: {consensus.get('confidence_score', 'N/A')}")
+        print(f"   - Human review: {'yes' if consensus.get('requires_human_review') else 'no'}")
 
         cases_list = aira.list_cases(page=1)
-        print(f"   ✓ Total cases: {cases_list.total}")
+        print(f"   - Total cases: {cases_list.total}")
     except AiraError as e:
-        print(f"   ⚠ Skipped: {e.message}")
+        print(f"   - Skipped: {e.message}")
     print()
 
     # ══════════════════════════════════════════════════════════
@@ -232,24 +243,24 @@ def main():
     print("4. Evidence & Discovery")
     print("-" * 40)
     package = aira.create_evidence_package(
-        title=f"Loan Decision — {APPLICATION['applicant']}",
+        title=f"Loan Decision - {APPLICATION['applicant']}",
         action_ids=action_ids,
-        description=f"Audit trail for €{APPLICATION['loan_amount_eur']:,} loan. Decision: {decision}.",
+        description=f"Audit trail for EUR {APPLICATION['loan_amount_eur']:,} loan. Decision: {decision}.",
     )
-    print(f"   ✓ Sealed: \"{package.title}\"")
-    print(f"   ✓ Hash: {package.package_hash[:30]}...")
+    print(f"   - Sealed: \"{package.title}\"")
+    print(f"   - Hash: {package.package_hash[:30]}...")
 
     packages_list = aira.list_evidence_packages(page=1)
-    print(f"   ✓ Total packages: {packages_list.total}")
+    print(f"   - Total packages: {packages_list.total}")
 
     pkg = aira.get_evidence_package(str(package.id))
-    print(f"   ✓ Retrieved: {pkg.title}")
+    print(f"   - Retrieved: {pkg.title}")
 
     try:
-        tt = aira.time_travel(agent_slug=AGENT_SLUG, point_in_time="2030-01-01T00:00:00Z")
-        print(f"   ✓ Time-travel: queried")
+        aira.time_travel(agent_slug=AGENT_SLUG, point_in_time="2030-01-01T00:00:00Z")
+        print(f"   - Time-travel: queried")
     except AiraError:
-        print(f"   ✓ Time-travel: endpoint available")
+        print(f"   - Time-travel: endpoint available")
     print()
 
     # ══════════════════════════════════════════════════════════
@@ -266,23 +277,23 @@ def main():
             data_retention_days=2555,
             notify_emails=["compliance@example.com"],
         )
-        print(f"   ✓ Will set: 2555-day retention")
+        print(f"   - Will set: 2555-day retention")
     except AiraError:
-        print(f"   ✓ Will exists")
+        print(f"   - Will exists")
 
     will = aira.get_agent_will(AGENT_SLUG)
     if will:
-        print(f"   ✓ Policy: {will.get('succession_policy', 'N/A')}")
+        print(f"   - Policy: {will.get('succession_policy', 'N/A')}")
 
     snapshot = aira.create_compliance_snapshot(
         framework="eu-ai-act",
         agent_slug=AGENT_SLUG,
         findings={"art_12_logging": "pass", "art_13_transparency": "pass", "art_14_oversight": "pass"},
     )
-    print(f"   ✓ EU AI Act: {snapshot.status}")
+    print(f"   - EU AI Act: {snapshot.status}")
 
     snapshots_list = aira.list_compliance_snapshots(page=1, framework="eu-ai-act")
-    print(f"   ✓ Snapshots: {snapshots_list.total}")
+    print(f"   - Snapshots: {snapshots_list.total}")
     print()
 
     # ══════════════════════════════════════════════════════════
@@ -292,19 +303,19 @@ def main():
     print("6. Escrow & Liability")
     print("-" * 40)
     try:
-        account = aira.create_escrow_account(purpose=f"Loan liability — {APPLICATION['applicant']}")
-        print(f"   ✓ Account: {account.id[:16]}...")
+        account = aira.create_escrow_account(purpose=f"Loan liability - {APPLICATION['applicant']}")
+        print(f"   - Account: {account.id[:16]}...")
 
         aira.escrow_deposit(account.id, amount=1500.00, description="10% liability deposit")
-        print(f"   ✓ Deposited: €1,500")
+        print(f"   - Deposited: EUR 1,500")
 
         aira.escrow_release(account.id, amount=1500.00, description="Loan disbursed")
-        print(f"   ✓ Released: €1,500")
+        print(f"   - Released: EUR 1,500")
 
         accounts_list = aira.list_escrow_accounts(page=1)
-        print(f"   ✓ Accounts: {accounts_list.total}")
+        print(f"   - Accounts: {accounts_list.total}")
     except AiraError as e:
-        print(f"   ⚠ Skipped: {e.message}")
+        print(f"   - Skipped: {e.message}")
     print()
 
     # ══════════════════════════════════════════════════════════
@@ -315,9 +326,9 @@ def main():
     print("-" * 40)
     try:
         resp = aira.ask("How many loan decisions were notarized today?")
-        print(f"   ✓ {resp.get('content', '')[:80]}...")
+        print(f"   - {resp.get('content', '')[:80]}...")
     except AiraError as e:
-        print(f"   ⚠ Skipped: {e.message}")
+        print(f"   - Skipped: {e.message}")
     print()
 
     # ══════════════════════════════════════════════════════════
@@ -327,13 +338,13 @@ def main():
     print("8. Public Verification")
     print("-" * 40)
     result = aira.verify_action(receipt.action_id)
-    print(f"   ✓ Valid: {result.valid}")
-    print(f"   ✓ Key: {result.public_key_id}")
-    print(f"   ✓ {result.message[:60]}...")
+    print(f"   - Valid: {result.valid}")
+    print(f"   - Key: {result.public_key_id}")
+    print(f"   - {result.message[:60]}...")
     print()
 
     # ══════════════════════════════════════════════════════════
-    # 9. ERROR HANDLING
+    # 9. ERROR HANDLING — POLICY_DENIED example
     # ══════════════════════════════════════════════════════════
 
     print("9. Error Handling")
@@ -341,7 +352,22 @@ def main():
     try:
         aira.verify_action("00000000-0000-0000-0000-000000000000")
     except AiraError as e:
-        print(f"   ✓ Caught: [{e.code}] {e.message}")
+        print(f"   - Caught: [{e.code}] {e.message}")
+    # POLICY_DENIED example — the details dict carries action_id + policy_id
+    try:
+        aira.authorize(
+            action_type="wire_transfer",
+            details="Attempt a wire — may be blocked by policy",
+            agent_id=AGENT_SLUG,
+        )
+    except AiraError as e:
+        if e.code == "POLICY_DENIED":
+            print(
+                f"   - Caught POLICY_DENIED: action_id={e.details.get('action_id')} "
+                f"policy_id={e.details.get('policy_id')}"
+            )
+        else:
+            print(f"   - Caught: [{e.code}] {e.message}")
     print()
 
     # ══════════════════════════════════════════════════════════

@@ -133,7 +133,7 @@ class TestMCPServer(unittest.TestCase):
             if env_backup is not None:
                 os.environ["AIRA_API_KEY"] = env_backup
 
-    # 4. list_tools returns 7 tools
+    # 4. list_tools returns 7 tools (authorize, notarize, verify, get_receipt, resolve_did, verify_credential, get_reputation)
     def test_list_tools_returns_seven_tools(self):
         server, _, _ = self._create_server()
         tools = _run(server._list_tools_handler())
@@ -145,19 +145,40 @@ class TestMCPServer(unittest.TestCase):
         tools = _run(server._list_tools_handler())
         names = {t.name for t in tools}
         self.assertEqual(names, {
-            "notarize_action", "verify_action", "get_receipt",
-            "resolve_did", "verify_credential", "get_reputation", "request_mutual_sign",
+            "authorize_action", "notarize_action", "verify_action", "get_receipt",
+            "resolve_did", "verify_credential", "get_reputation",
         })
 
-    # 6. notarize_action tool calls client.notarize
+    # 6a. authorize_action tool calls client.authorize
+    def test_authorize_action_calls_client_authorize(self):
+        server, mock_client, _ = self._create_server()
+
+        class _FakeAuth:
+            def __init__(self):
+                self.action_id = "act_123"
+                self.status = "authorized"
+
+        mock_client.authorize.return_value = _FakeAuth()
+        result = _run(server._call_tool_handler(
+            "authorize_action",
+            {"action_type": "email_sent", "details": "About to send email", "agent_id": "my-agent"},
+        ))
+        mock_client.authorize.assert_called_once()
+        data = json.loads(result[0].text)
+        self.assertEqual(data["action_id"], "act_123")
+        self.assertEqual(data["status"], "authorized")
+
+    # 6b. notarize_action tool calls client.notarize(action_id, outcome)
     def test_notarize_action_calls_client_notarize(self):
         server, mock_client, _ = self._create_server()
         mock_client.notarize.return_value = _FakeReceipt()
         result = _run(server._call_tool_handler(
             "notarize_action",
-            {"action_type": "email_sent", "details": "Sent email", "agent_id": "my-agent"},
+            {"action_id": "act_123", "outcome": "completed", "outcome_details": "ok"},
         ))
-        mock_client.notarize.assert_called_once()
+        mock_client.notarize.assert_called_once_with(
+            action_id="act_123", outcome="completed", outcome_details="ok"
+        )
         self.assertEqual(len(result), 1)
         data = json.loads(result[0].text)
         self.assertEqual(data["id"], "act_123")
@@ -224,25 +245,13 @@ class TestMCPServer(unittest.TestCase):
         self.assertEqual(data["score"], 92)
         self.assertEqual(data["tier"], "platinum")
 
-    # 8e. request_mutual_sign tool calls client.request_mutual_sign
-    def test_request_mutual_sign_calls_client(self):
-        server, mock_client, _ = self._create_server()
-        mock_client.request_mutual_sign.return_value = {"status": "pending", "action_id": "act_123"}
-        result = _run(server._call_tool_handler(
-            "request_mutual_sign",
-            {"action_id": "act_123", "counterparty_did": "did:web:airaproof.com:agents:peer"},
-        ))
-        mock_client.request_mutual_sign.assert_called_once_with("act_123", "did:web:airaproof.com:agents:peer")
-        data = json.loads(result[0].text)
-        self.assertEqual(data["status"], "pending")
-
     # 9. error propagation returns safe error JSON (no raw exception leakage)
     def test_error_returns_error_json(self):
         server, mock_client, _ = self._create_server()
         mock_client.notarize.side_effect = RuntimeError("API exploded")
         result = _run(server._call_tool_handler(
             "notarize_action",
-            {"action_type": "test", "details": "test"},
+            {"action_id": "act_123"},
         ))
         data = json.loads(result[0].text)
         self.assertIn("error", data)

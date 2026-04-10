@@ -2,11 +2,8 @@
 
 from __future__ import annotations
 
-import functools
-import hashlib
-import json
 import logging
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
@@ -16,7 +13,9 @@ from aira.types import (
     ActionReceipt,
     AgentDetail,
     AgentVersion,
+    Authorization,
     ComplianceSnapshot,
+    CosignResult,
     EscrowAccount,
     EscrowTransaction,
     EvidencePackage,
@@ -32,12 +31,28 @@ MAX_DETAILS_LENGTH = 50_000
 
 
 class AiraError(Exception):
-    """Aira API error."""
+    """Aira API error.
 
-    def __init__(self, status: int, code: str, message: str) -> None:
+    Attributes:
+        status: HTTP status code.
+        code: Error code string (e.g. ``"POLICY_DENIED"``, ``"NOT_FOUND"``).
+        message: Human-readable error message.
+        details: Optional dict with additional context from the backend.
+            For ``POLICY_DENIED`` errors this includes ``action_id`` and
+            ``policy_id`` of the policy that denied the action.
+    """
+
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        message: str,
+        details: dict | None = None,
+    ) -> None:
         self.status = status
         self.code = code
         self.message = message
+        self.details = details or {}
         super().__init__(f"[{code}] {message}")
 
 
@@ -47,7 +62,12 @@ def _handle_response(resp: httpx.Response) -> dict:
             body = resp.json()
         except Exception:
             body = {"error": resp.text, "code": "UNKNOWN"}
-        raise AiraError(resp.status_code, body.get("code", "UNKNOWN"), body.get("error", resp.text))
+        raise AiraError(
+            resp.status_code,
+            body.get("code", "UNKNOWN"),
+            body.get("error", resp.text),
+            details=body.get("details"),
+        )
     if resp.status_code == 204:
         return {}
     return resp.json()
@@ -87,19 +107,27 @@ def _build_body(**kwargs: Any) -> dict:
     return {k: v for k, v in kwargs.items() if v is not None}
 
 
-class _BaseMixin:
-    """Shared helper methods."""
-
-    def _hash_input(self, data: str) -> str:
-        return f"sha256:{hashlib.sha256(data.encode()).hexdigest()}"
-
-
-class Aira(_BaseMixin):
+class Aira:
     """Synchronous Aira client.
 
     Usage:
         aira = Aira(api_key="aira_live_xxx")
-        receipt = aira.notarize(action_type="email_sent", details="Sent email")
+
+        # Step 1: ask Aira for permission
+        auth = aira.authorize(
+            action_type="wire_transfer",
+            details="Send €75K to vendor X",
+            agent_id="payments-agent",
+        )
+
+        if auth.status == "authorized":
+            # Step 2: execute, then report outcome
+            result = send_wire(75000)
+            aira.notarize(
+                action_id=auth.action_id,
+                outcome="completed",
+                outcome_details=f"Sent. ref={result.id}",
+            )
     """
 
     def __init__(
@@ -163,38 +191,86 @@ class Aira(_BaseMixin):
 
     # ==================== Actions ====================
 
-    def notarize(
+    def authorize(
         self,
         action_type: str,
         details: str,
         agent_id: str | None = None,
         agent_version: str | None = None,
+        instruction_hash: str | None = None,
         model_id: str | None = None,
         model_version: str | None = None,
-        instruction_hash: str | None = None,
         parent_action_id: str | None = None,
+        endpoint_url: str | None = None,
         store_details: bool = False,
         idempotency_key: str | None = None,
         require_approval: bool = False,
         approvers: list[str] | None = None,
-    ) -> ActionReceipt:
-        """Notarize an agent action. Returns a cryptographic receipt."""
+    ) -> Authorization:
+        """Step 1 of 2: ask Aira for permission to perform an action.
+
+        This creates an action record and runs it through your org's policy
+        engine before the agent executes anything. The returned
+        :class:`Authorization` has a status that tells the agent what to do:
+
+        - ``"authorized"``: agent may now execute, then call :meth:`notarize`
+          with the returned ``action_id`` to mint the receipt.
+        - ``"pending_approval"``: held for human review. The agent should not
+          execute — wait for an approver to act on it, then handle the
+          ``action.approved`` webhook or poll :meth:`get_action`.
+
+        Raises:
+            AiraError: with ``code="POLICY_DENIED"`` if a policy denied the
+                action. ``error.details`` contains ``action_id`` and
+                ``policy_id``. Other codes include ``ENDPOINT_TLS_MISMATCH``,
+                ``ENDPOINT_NOT_WHITELISTED``, ``DUPLICATE_REQUEST``.
+        """
         body = _build_body(
             action_type=action_type,
             details=_truncate_details(details),
             agent_id=agent_id,
             agent_version=agent_version,
+            instruction_hash=instruction_hash,
             model_id=model_id,
             model_version=model_version,
-            instruction_hash=instruction_hash,
             parent_action_id=parent_action_id,
+            endpoint_url=endpoint_url,
             idempotency_key=idempotency_key,
             require_approval=require_approval or None,
             approvers=approvers,
         )
         if store_details:
             body["store_details"] = True
-        return _to_dataclass(ActionReceipt, self._post("/actions", body))
+        return _to_dataclass(Authorization, self._post("/actions", body))
+
+    def notarize(
+        self,
+        action_id: str,
+        outcome: str = "completed",
+        outcome_details: str | None = None,
+    ) -> ActionReceipt:
+        """Step 2 of 2: report what actually happened for an authorized action.
+
+        Call this after the agent has executed the action that was previously
+        approved by :meth:`authorize`. Mints the cryptographic receipt if the
+        outcome is ``"completed"``. If the outcome is ``"failed"`` no receipt
+        is minted — the action record just transitions to the failed state.
+
+        Args:
+            action_id: The ``action_id`` returned by :meth:`authorize`.
+            outcome: ``"completed"`` or ``"failed"``.
+            outcome_details: Optional free-form text describing the outcome
+                (e.g. ``"Wire sent, ref TX12345"`` or ``"Rejected by upstream API"``).
+
+        Raises:
+            AiraError: with ``code="INVALID_STATE"`` if the action is not in
+                ``authorized`` or ``approved`` state (e.g. already notarized,
+                pending approval, or denied).
+        """
+        body = _build_body(outcome=outcome, outcome_details=outcome_details)
+        return _to_dataclass(
+            ActionReceipt, self._post(f"/actions/{action_id}/notarize", body)
+        )
 
     def get_action(self, action_id: str) -> ActionDetail:
         """Get full action details including receipt and authorizations."""
@@ -204,13 +280,19 @@ class Aira(_BaseMixin):
         self, page: int = 1, per_page: int = 20,
         action_type: str | None = None, agent_id: str | None = None, status: str | None = None,
     ) -> PaginatedList:
-        """List notarized actions with filters."""
+        """List actions with filters."""
         params = _build_body(page=page, per_page=per_page, action_type=action_type, agent_id=agent_id, status=status)
         return _paginated(self._get("/actions", params))
 
-    def authorize_action(self, action_id: str) -> dict:
-        """Human co-sign an action. Requires JWT auth."""
-        return self._post(f"/actions/{action_id}/authorize", {})
+    def cosign_action(self, action_id: str) -> CosignResult:
+        """Human co-signature on an authorized or notarized action.
+
+        Used for high-stakes actions where a human signs alongside the agent.
+        Requires JWT auth (dashboard user, not an API key).
+        """
+        return _to_dataclass(
+            CosignResult, self._post(f"/actions/{action_id}/cosign", {})
+        )
 
     def set_legal_hold(self, action_id: str) -> dict:
         """Set legal hold — prevents deletion."""
@@ -487,75 +569,37 @@ class Aira(_BaseMixin):
 
     # ==================== Session ====================
 
-    def session(self, agent_id: str, **defaults) -> AiraSession:
-        """Create a scoped session with pre-filled defaults."""
+    def session(self, agent_id: str, **defaults: Any) -> AiraSession:
+        """Create a scoped session with pre-filled defaults for authorize()."""
         return AiraSession(self, agent_id=agent_id, **defaults)
-
-    # ==================== Decorator ====================
-
-    def trace(
-        self,
-        agent_id: str,
-        action_type: str = "function_call",
-        model_id: str | None = None,
-        include_result: bool = False,
-        require_approval: bool = False,
-        approvers: list[str] | None = None,
-    ) -> Callable:
-        """Decorator that auto-notarizes function calls.
-
-        Args:
-            agent_id: The agent performing this action.
-            action_type: Action type to record.
-            model_id: Optional model ID.
-            include_result: If True, includes the return value in details.
-                WARNING: Only enable if the function does NOT return sensitive data.
-                Disabled by default to prevent accidental PII/secret leakage.
-            require_approval: If True, action requires human approval before finalizing.
-            approvers: List of approver emails (used when require_approval is True).
-        """
-        def decorator(func: Callable) -> Callable:
-            @functools.wraps(func)
-            def wrapper(*args: Any, **kwargs: Any) -> Any:
-                # Hash inputs (never send raw inputs — they may contain secrets)
-                input_repr = json.dumps({"fn": func.__name__, "arg_count": len(args), "kwarg_keys": sorted(kwargs.keys())}, sort_keys=True)
-                instruction_hash = self._hash_input(input_repr)
-
-                result = func(*args, **kwargs)
-
-                # Build safe details — never include raw args/kwargs
-                details = f"Called {func.__module__}.{func.__name__}()"
-                if include_result:
-                    details += f" -> {str(result)[:200]}"
-
-                try:
-                    self.notarize(
-                        action_type=action_type, details=details,
-                        agent_id=agent_id, model_id=model_id, instruction_hash=instruction_hash,
-                        require_approval=require_approval, approvers=approvers,
-                    )
-                except Exception as e:
-                    logger.warning("Aira notarization failed (non-blocking): %s", e)
-
-                return result
-            return wrapper
-        return decorator
 
 
 class AiraSession:
-    """Scoped session with pre-filled defaults."""
+    """Scoped session with pre-filled defaults for :meth:`Aira.authorize`.
+
+    Every ``authorize()`` call on the session inherits the defaults
+    (``agent_id``, ``model_id``, etc.) so you don't have to repeat them.
+    ``notarize()`` passes through to the underlying client unchanged since
+    it only takes an ``action_id``.
+    """
 
     def __init__(self, client: Aira, agent_id: str, **defaults: Any) -> None:
         self._client = client
         self._defaults = {"agent_id": agent_id, **defaults}
 
-    def notarize(self, action_type: str, details: str, **kwargs: Any) -> ActionReceipt:
+    def authorize(self, action_type: str, details: str, **kwargs: Any) -> Authorization:
         merged = {**self._defaults, **kwargs}
-        return self._client.notarize(action_type=action_type, details=details, **merged)
+        return self._client.authorize(action_type=action_type, details=details, **merged)
 
-    def trace(self, **kwargs: Any) -> Callable:
-        merged = {**self._defaults, **kwargs}
-        return self._client.trace(**merged)
+    def notarize(
+        self,
+        action_id: str,
+        outcome: str = "completed",
+        outcome_details: str | None = None,
+    ) -> ActionReceipt:
+        return self._client.notarize(
+            action_id=action_id, outcome=outcome, outcome_details=outcome_details
+        )
 
     def __enter__(self) -> AiraSession:
         return self
@@ -564,7 +608,7 @@ class AiraSession:
         pass
 
 
-class AsyncAira(_BaseMixin):
+class AsyncAira:
     """Asynchronous Aira client — mirrors Aira sync client exactly."""
 
     def __init__(
@@ -627,38 +671,58 @@ class AsyncAira(_BaseMixin):
 
     # ==================== Actions ====================
 
-    async def notarize(
+    async def authorize(
         self,
         action_type: str,
         details: str,
         agent_id: str | None = None,
         agent_version: str | None = None,
+        instruction_hash: str | None = None,
         model_id: str | None = None,
         model_version: str | None = None,
-        instruction_hash: str | None = None,
         parent_action_id: str | None = None,
+        endpoint_url: str | None = None,
         store_details: bool = False,
         idempotency_key: str | None = None,
         require_approval: bool = False,
         approvers: list[str] | None = None,
-    ) -> ActionReceipt:
-        """Notarize an agent action. Returns a cryptographic receipt."""
+    ) -> Authorization:
+        """Step 1 of 2: ask Aira for permission to perform an action.
+
+        See :meth:`Aira.authorize` for the full contract.
+        """
         body = _build_body(
             action_type=action_type,
             details=_truncate_details(details),
             agent_id=agent_id,
             agent_version=agent_version,
+            instruction_hash=instruction_hash,
             model_id=model_id,
             model_version=model_version,
-            instruction_hash=instruction_hash,
             parent_action_id=parent_action_id,
+            endpoint_url=endpoint_url,
             idempotency_key=idempotency_key,
             require_approval=require_approval or None,
             approvers=approvers,
         )
         if store_details:
             body["store_details"] = True
-        return _to_dataclass(ActionReceipt, await self._post("/actions", body))
+        return _to_dataclass(Authorization, await self._post("/actions", body))
+
+    async def notarize(
+        self,
+        action_id: str,
+        outcome: str = "completed",
+        outcome_details: str | None = None,
+    ) -> ActionReceipt:
+        """Step 2 of 2: report what actually happened for an authorized action.
+
+        See :meth:`Aira.notarize` for the full contract.
+        """
+        body = _build_body(outcome=outcome, outcome_details=outcome_details)
+        return _to_dataclass(
+            ActionReceipt, await self._post(f"/actions/{action_id}/notarize", body)
+        )
 
     async def get_action(self, action_id: str) -> ActionDetail:
         return _to_dataclass(ActionDetail, await self._get(f"/actions/{action_id}"))
@@ -667,12 +731,15 @@ class AsyncAira(_BaseMixin):
         self, page: int = 1, per_page: int = 20,
         action_type: str | None = None, agent_id: str | None = None, status: str | None = None,
     ) -> PaginatedList:
-        """List notarized actions with filters."""
+        """List actions with filters."""
         params = _build_body(page=page, per_page=per_page, action_type=action_type, agent_id=agent_id, status=status)
         return _paginated(await self._get("/actions", params))
 
-    async def authorize_action(self, action_id: str) -> dict:
-        return await self._post(f"/actions/{action_id}/authorize", {})
+    async def cosign_action(self, action_id: str) -> CosignResult:
+        """Human co-signature on an authorized or notarized action."""
+        return _to_dataclass(
+            CosignResult, await self._post(f"/actions/{action_id}/cosign", {})
+        )
 
     async def set_legal_hold(self, action_id: str) -> dict:
         return await self._post(f"/actions/{action_id}/hold", {})
@@ -939,57 +1006,32 @@ class AsyncAira(_BaseMixin):
     # ==================== Session ====================
 
     def session(self, agent_id: str, **defaults: Any) -> AsyncAiraSession:
-        """Create a scoped async session with pre-filled defaults."""
+        """Create a scoped async session with pre-filled defaults for authorize()."""
         return AsyncAiraSession(self, agent_id=agent_id, **defaults)
-
-    # ==================== Decorator ====================
-
-    def trace(
-        self,
-        agent_id: str,
-        action_type: str = "function_call",
-        model_id: str | None = None,
-        include_result: bool = False,
-        require_approval: bool = False,
-        approvers: list[str] | None = None,
-    ) -> Callable:
-        """Async decorator that auto-notarizes function calls. Safe by default — does NOT send args or return values."""
-        def decorator(func: Callable) -> Callable:
-            @functools.wraps(func)
-            async def wrapper(*args: Any, **kwargs: Any) -> Any:
-                input_repr = json.dumps({"fn": func.__name__, "arg_count": len(args), "kwarg_keys": sorted(kwargs.keys())}, sort_keys=True)
-                instruction_hash = self._hash_input(input_repr)
-                result = await func(*args, **kwargs)
-                details = f"Called {func.__module__}.{func.__name__}()"
-                if include_result:
-                    details += f" -> {str(result)[:200]}"
-                try:
-                    await self.notarize(
-                        action_type=action_type, details=details,
-                        agent_id=agent_id, model_id=model_id, instruction_hash=instruction_hash,
-                        require_approval=require_approval, approvers=approvers,
-                    )
-                except Exception as e:
-                    logger.warning("Aira notarization failed (non-blocking): %s", e)
-                return result
-            return wrapper
-        return decorator
 
 
 class AsyncAiraSession:
-    """Scoped async session with pre-filled defaults."""
+    """Scoped async session with pre-filled defaults for :meth:`AsyncAira.authorize`."""
 
     def __init__(self, client: AsyncAira, agent_id: str, **defaults: Any) -> None:
         self._client = client
         self._defaults = {"agent_id": agent_id, **defaults}
 
-    async def notarize(self, action_type: str, details: str, **kwargs: Any) -> ActionReceipt:
+    async def authorize(self, action_type: str, details: str, **kwargs: Any) -> Authorization:
         merged = {**self._defaults, **kwargs}
-        return await self._client.notarize(action_type=action_type, details=details, **merged)
+        return await self._client.authorize(
+            action_type=action_type, details=details, **merged
+        )
 
-    def trace(self, **kwargs: Any) -> Callable:
-        merged = {**self._defaults, **kwargs}
-        return self._client.trace(**merged)
+    async def notarize(
+        self,
+        action_id: str,
+        outcome: str = "completed",
+        outcome_details: str | None = None,
+    ) -> ActionReceipt:
+        return await self._client.notarize(
+            action_id=action_id, outcome=outcome, outcome_details=outcome_details
+        )
 
     async def __aenter__(self) -> AsyncAiraSession:
         return self

@@ -1,21 +1,29 @@
 """Aira SDK — AI governance infrastructure.
 
-Usage:
+Two-step flow:
+
     from aira import Aira
 
     aira = Aira(api_key="aira_live_xxx")
 
-    # Notarize an action
-    receipt = aira.notarize(
-        action_type="email_sent",
-        details="Sent onboarding email to customer@example.com",
-        agent_id="support-agent",
+    # Step 1: ask Aira for permission
+    auth = aira.authorize(
+        action_type="wire_transfer",
+        details="Send €75K to vendor X",
+        agent_id="payments-agent",
     )
 
-    # Decorator
-    @aira.trace(agent_id="lending-agent", action_type="loan_decision")
-    def approve_loan(application):
-        return model.predict(application)
+    if auth.status == "authorized":
+        # Step 2: execute, then report outcome
+        result = send_wire(75000, to="vendor-x")
+        aira.notarize(
+            action_id=auth.action_id,
+            outcome="completed",
+            outcome_details=f"Sent. ref={result.id}",
+        )
+    elif auth.status == "pending_approval":
+        queue.enqueue(auth.action_id)  # wait for approver
+    # POLICY_DENIED is raised as AiraError
 """
 
 from aira.client import Aira, AsyncAira, AiraError, AiraSession, AsyncAiraSession
@@ -24,15 +32,17 @@ from aira.types import (
     ActionDetail,
     AgentDetail,
     AgentVersion,
-    EvidencePackage,
+    Authorization,
     ComplianceSnapshot,
+    CosignResult,
     EscrowAccount,
     EscrowTransaction,
-    VerifyResult,
+    EvidencePackage,
     PaginatedList,
+    VerifyResult,
 )
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 __all__ = [
     "Aira",
@@ -44,10 +54,12 @@ __all__ = [
     "ActionDetail",
     "AgentDetail",
     "AgentVersion",
-    "EvidencePackage",
+    "Authorization",
     "ComplianceSnapshot",
+    "CosignResult",
     "EscrowAccount",
     "EscrowTransaction",
-    "VerifyResult",
+    "EvidencePackage",
     "PaginatedList",
+    "VerifyResult",
 ]

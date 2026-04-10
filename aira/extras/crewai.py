@@ -1,6 +1,19 @@
-"""CrewAI integration — notarize task and step completions."""
+"""CrewAI integration — audit-only logging of task and step completions.
+
+CrewAI exposes ``task_callback`` and ``step_callback`` which fire AFTER the
+work has already been performed. There is no pre-execution hook that can
+reliably abort a step or task across all CrewAI versions, so **this
+integration is audit-only**: it records what happened but cannot gate it.
+
+If you need a real authorization gate on CrewAI actions, call
+:meth:`aira.Aira.authorize` directly from inside your tool or task code
+(before the side-effect) and check ``auth.status`` yourself.
+
+Each callback runs a full authorize → notarize cycle back-to-back so the
+cryptographic receipt still records the action with a policy evaluation.
+"""
 from __future__ import annotations
-import json
+
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -11,86 +24,55 @@ logger = logging.getLogger(__name__)
 
 
 class AiraCrewHook:
-    """CrewAI hook that notarizes task completions via Aira."""
+    """Audit-only CrewAI hook.
 
-    def __init__(self, client: "Aira", agent_id: str, model_id: str | None = None, trust_policy: dict | None = None):
+    .. warning::
+       CrewAI does not provide pre-execution hooks, so this integration
+       is audit-only — it cannot prevent a task or step from running. For
+       true gating, call :meth:`aira.Aira.authorize` inside your tool
+       functions before performing the side-effect.
+    """
+
+    def __init__(self, client: "Aira", agent_id: str, model_id: str | None = None):
         self.client = client
         self.agent_id = agent_id
         self.model_id = model_id
-        self._trust_policy = trust_policy
 
-    def _check_trust(self, counterparty_id: str | None = None) -> dict:
-        """Check counterparty trust. Returns trust_context dict for receipt enrichment."""
-        if not self._trust_policy or not counterparty_id:
-            return {}
-
-        trust_context: dict[str, Any] = {"counterparty_id": counterparty_id}
-
+    def _audit(self, action_type: str, details: str) -> None:
+        """Authorize then immediately notarize — records the action post-hoc."""
         try:
-            if self._trust_policy.get("verify_counterparty"):
-                try:
-                    did_info = self.client.get_agent_did(counterparty_id)
-                    trust_context["did_resolved"] = True
-                    trust_context["did"] = did_info.get("did")
-                except Exception:
-                    trust_context["did_resolved"] = False
-                    trust_context["recommendation"] = "Counterparty not registered in Aira"
-
-            if self._trust_policy.get("require_valid_vc") and trust_context.get("did_resolved"):
-                try:
-                    vc = self.client.get_agent_credential(counterparty_id)
-                    result = self.client.verify_credential(vc)
-                    trust_context["vc_valid"] = result.get("valid", False)
-                    if not trust_context["vc_valid"] and self._trust_policy.get("block_revoked_vc"):
-                        trust_context["blocked"] = True
-                        trust_context["block_reason"] = "Counterparty VC revoked or invalid"
-                except Exception:
-                    trust_context["vc_valid"] = None
-
-            min_rep = self._trust_policy.get("min_reputation")
-            if min_rep and trust_context.get("did_resolved"):
-                try:
-                    rep = self.client.get_reputation(counterparty_id)
-                    trust_context["reputation_score"] = rep.get("score")
-                    trust_context["reputation_tier"] = rep.get("tier")
-                    if rep.get("score", 0) < min_rep:
-                        trust_context["reputation_warning"] = f"Below minimum ({rep.get('score')} < {min_rep})"
-                except Exception:
-                    trust_context["reputation_score"] = None
-        except Exception:
-            pass  # trust checks are non-blocking
-
-        return trust_context
-
-    def _notarize(self, action_type: str, details: str, counterparty_id: str | None = None) -> None:
-        try:
-            trust_ctx = self._check_trust(counterparty_id)
-            if trust_ctx.get("blocked"):
-                logger.warning("Action blocked by trust policy: %s", trust_ctx.get("block_reason"))
-                return
-
-            full_details = details
-            if trust_ctx:
-                full_details += f" | trust: {json.dumps(trust_ctx)}"
-
-            kwargs: dict[str, Any] = {"action_type": action_type, "details": full_details[:5000], "agent_id": self.agent_id}
-            if self.model_id:
-                kwargs["model_id"] = self.model_id
-            self.client.notarize(**kwargs)
+            auth = self.client.authorize(
+                action_type=action_type,
+                details=details[:5000],
+                agent_id=self.agent_id,
+                model_id=self.model_id,
+            )
+            if auth.status == "authorized":
+                self.client.notarize(
+                    action_id=auth.action_id,
+                    outcome="completed",
+                    outcome_details=details[:5000],
+                )
+            else:
+                logger.info(
+                    "Aira audit skipped notarize: action %s is %s",
+                    auth.action_id,
+                    auth.status,
+                )
         except Exception as e:
-            logger.warning("Aira notarize failed (non-blocking): %s", e)
+            logger.warning("Aira audit failed (non-blocking): %s", e)
 
     def task_callback(self, output: Any) -> None:
         """Called by CrewAI when a task completes."""
         desc = str(getattr(output, "description", ""))[:200]
-        self._notarize("task_completed", f"Task completed: {desc}")
+        self._audit("task_completed", f"Task completed: {desc}")
 
     def step_callback(self, step_output: Any) -> None:
         """Called by CrewAI on each agent step."""
-        self._notarize("agent_step", f"Agent step completed. Output length: {len(str(step_output))} chars")
+        self._audit("agent_step", f"Agent step completed. Output length: {len(str(step_output))} chars")
 
     @classmethod
-    def for_crew(cls, client: "Aira", agent_id: str, **kwargs) -> dict[str, Any]:
+    def for_crew(cls, client: "Aira", agent_id: str, **kwargs: Any) -> dict[str, Any]:
         """Return callbacks dict compatible with CrewAI's Crew() constructor."""
         hook = cls(client, agent_id, **kwargs)
         return {

@@ -1,7 +1,24 @@
-"""Google ADK integration — notarize tool calls via plugin hooks."""
+"""Google ADK integration — real pre-execution gate via before/after tool hooks.
+
+Google ADK's plugin system provides ``before_tool_call`` and ``after_tool_call``
+hooks. ``before_tool_call`` is invoked before the tool runs and can raise to
+abort the call, so this IS a real gate.
+
+Usage::
+
+    plugin = AiraPlugin(client=aira, agent_id="adk-agent", model_id="gemini-2.0-flash")
+    plugin.before_tool_call("search_documents", args={"query": "..."})
+    try:
+        result = search_documents(query="...")
+    except Exception as e:
+        plugin.on_tool_error("search_documents", e)
+        raise
+    plugin.after_tool_call("search_documents", result=result)
+"""
 from __future__ import annotations
-import json
+
 import logging
+import threading
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,81 +27,83 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class AiraPlugin:
-    """Google ADK plugin that notarizes tool calls via Aira."""
+class AiraToolDenied(Exception):
+    """Raised from ``before_tool_call`` when Aira denies a tool call."""
 
-    def __init__(self, client: "Aira", agent_id: str, model_id: str | None = None, trust_policy: dict | None = None):
+    def __init__(self, tool: str, code: str, message: str) -> None:
+        self.tool = tool
+        self.code = code
+        self.message = message
+        super().__init__(f"Aira denied tool '{tool}': [{code}] {message}")
+
+
+class AiraPlugin:
+    """Google ADK plugin that gates tool calls through Aira."""
+
+    def __init__(self, client: "Aira", agent_id: str, model_id: str | None = None):
         self.client = client
         self.agent_id = agent_id
         self.model_id = model_id
-        self._trust_policy = trust_policy
+        # Map tool_name → most recent action_id so after_tool_call can notarize.
+        self._inflight: dict[str, str] = {}
+        self._lock = threading.Lock()
 
-    def _check_trust(self, counterparty_id: str | None = None) -> dict:
-        """Check counterparty trust. Returns trust_context dict for receipt enrichment."""
-        if not self._trust_policy or not counterparty_id:
-            return {}
+    def before_tool_call(self, tool_name: str, args: dict | None = None) -> None:
+        """Authorize the tool call BEFORE it runs.
 
-        trust_context: dict[str, Any] = {"counterparty_id": counterparty_id}
-
+        Raises :class:`AiraToolDenied` if the policy engine denies or holds
+        the action. The caller should not execute the tool if this raises.
+        """
+        arg_keys = sorted((args or {}).keys())
+        details = f"Tool '{tool_name}' invoked. Arg keys: {arg_keys}"
         try:
-            if self._trust_policy.get("verify_counterparty"):
-                try:
-                    did_info = self.client.get_agent_did(counterparty_id)
-                    trust_context["did_resolved"] = True
-                    trust_context["did"] = did_info.get("did")
-                except Exception:
-                    trust_context["did_resolved"] = False
-                    trust_context["recommendation"] = "Counterparty not registered in Aira"
+            auth = self.client.authorize(
+                action_type="tool_invoked",
+                details=details[:5000],
+                agent_id=self.agent_id,
+                model_id=self.model_id,
+            )
+        except Exception as e:
+            code = getattr(e, "code", "AUTHORIZE_FAILED")
+            msg = getattr(e, "message", str(e))
+            raise AiraToolDenied(tool_name, code, msg) from e
 
-            if self._trust_policy.get("require_valid_vc") and trust_context.get("did_resolved"):
-                try:
-                    vc = self.client.get_agent_credential(counterparty_id)
-                    result = self.client.verify_credential(vc)
-                    trust_context["vc_valid"] = result.get("valid", False)
-                    if not trust_context["vc_valid"] and self._trust_policy.get("block_revoked_vc"):
-                        trust_context["blocked"] = True
-                        trust_context["block_reason"] = "Counterparty VC revoked or invalid"
-                except Exception:
-                    trust_context["vc_valid"] = None
+        if auth.status == "pending_approval":
+            raise AiraToolDenied(
+                tool_name,
+                "PENDING_APPROVAL",
+                f"Tool call held for approval (action {auth.action_id})",
+            )
 
-            min_rep = self._trust_policy.get("min_reputation")
-            if min_rep and trust_context.get("did_resolved"):
-                try:
-                    rep = self.client.get_reputation(counterparty_id)
-                    trust_context["reputation_score"] = rep.get("score")
-                    trust_context["reputation_tier"] = rep.get("tier")
-                    if rep.get("score", 0) < min_rep:
-                        trust_context["reputation_warning"] = f"Below minimum ({rep.get('score')} < {min_rep})"
-                except Exception:
-                    trust_context["reputation_score"] = None
-        except Exception:
-            pass  # trust checks are non-blocking
+        with self._lock:
+            self._inflight[tool_name] = auth.action_id
 
-        return trust_context
-
-    def _notarize(self, action_type: str, details: str, counterparty_id: str | None = None) -> None:
+    def after_tool_call(self, tool_name: str, result: Any = None) -> None:
+        """Notarize a successful tool call."""
+        with self._lock:
+            action_id = self._inflight.pop(tool_name, None)
+        if not action_id:
+            return
         try:
-            trust_ctx = self._check_trust(counterparty_id)
-            if trust_ctx.get("blocked"):
-                logger.warning("Action blocked by trust policy: %s", trust_ctx.get("block_reason"))
-                return
-
-            full_details = details
-            if trust_ctx:
-                full_details += f" | trust: {json.dumps(trust_ctx)}"
-
-            kwargs: dict[str, Any] = {"action_type": action_type, "details": full_details[:5000], "agent_id": self.agent_id}
-            if self.model_id:
-                kwargs["model_id"] = self.model_id
-            self.client.notarize(**kwargs)
+            self.client.notarize(
+                action_id=action_id,
+                outcome="completed",
+                outcome_details=f"Tool '{tool_name}' completed. Result length: {len(str(result))} chars",
+            )
         except Exception as e:
             logger.warning("Aira notarize failed (non-blocking): %s", e)
 
-    def before_tool_call(self, tool_name: str, args: dict | None = None) -> None:
-        """ADK before_tool_call hook."""
-        arg_keys = list((args or {}).keys())
-        self._notarize("tool_invoked", f"Tool '{tool_name}' invoked. Arg keys: {arg_keys}", counterparty_id=tool_name)
-
-    def after_tool_call(self, tool_name: str, result: Any = None) -> None:
-        """ADK after_tool_call hook."""
-        self._notarize("tool_completed", f"Tool '{tool_name}' completed. Result length: {len(str(result))} chars", counterparty_id=tool_name)
+    def on_tool_error(self, tool_name: str, error: BaseException) -> None:
+        """Notarize a failed tool call."""
+        with self._lock:
+            action_id = self._inflight.pop(tool_name, None)
+        if not action_id:
+            return
+        try:
+            self.client.notarize(
+                action_id=action_id,
+                outcome="failed",
+                outcome_details=f"Tool '{tool_name}' errored: {type(error).__name__}: {str(error)[:200]}",
+            )
+        except Exception as e:
+            logger.warning("Aira notarize failed (non-blocking): %s", e)

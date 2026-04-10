@@ -1,4 +1,4 @@
-"""MCP server exposing Aira actions as tools for AI agents."""
+"""MCP server exposing Aira's two-step flow as tools for AI agents."""
 from __future__ import annotations
 import json
 import logging
@@ -37,17 +37,38 @@ def create_server(api_key: str | None = None, base_url: str | None = None) -> Se
     async def list_tools() -> list[Tool]:
         return [
             Tool(
-                name="notarize_action",
-                description="Notarize an AI agent action with a cryptographic receipt",
+                name="authorize_action",
+                description=(
+                    "Step 1 of 2: ask Aira for permission to perform an action. "
+                    "Returns an Authorization with status 'authorized' or 'pending_approval'. "
+                    "Call notarize_action with the returned action_id after executing."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "action_type": {"type": "string", "description": "e.g. email_sent, loan_approved, claim_processed"},
-                        "details": {"type": "string", "description": "What happened"},
+                        "action_type": {"type": "string", "description": "e.g. email_sent, loan_approved, wire_transfer"},
+                        "details": {"type": "string", "description": "What the agent is about to do"},
                         "agent_id": {"type": "string", "description": "Agent slug"},
                         "model_id": {"type": "string", "description": "Model used (optional)"},
+                        "endpoint_url": {"type": "string", "description": "Target URL if this is an API call (optional)"},
                     },
                     "required": ["action_type", "details"],
+                },
+            ),
+            Tool(
+                name="notarize_action",
+                description=(
+                    "Step 2 of 2: report the outcome of an authorized action. "
+                    "Mints the cryptographic receipt if outcome is 'completed'."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "action_id": {"type": "string", "description": "action_id returned by authorize_action"},
+                        "outcome": {"type": "string", "enum": ["completed", "failed"], "description": "Outcome of the action"},
+                        "outcome_details": {"type": "string", "description": "Optional free-form description of what happened"},
+                    },
+                    "required": ["action_id"],
                 },
             ),
             Tool(
@@ -105,25 +126,21 @@ def create_server(api_key: str | None = None, base_url: str | None = None) -> Se
                     "required": ["agent_slug"],
                 },
             ),
-            Tool(
-                name="request_mutual_sign",
-                description="Initiate a mutual signing request for a notarized action with a counterparty",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "action_id": {"type": "string", "description": "Action UUID to co-sign"},
-                        "counterparty_did": {"type": "string", "description": "DID of the counterparty agent"},
-                    },
-                    "required": ["action_id", "counterparty_did"],
-                },
-            ),
         ]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         try:
-            if name == "notarize_action":
-                result = client.notarize(**{k: v for k, v in arguments.items() if v})
+            if name == "authorize_action":
+                result = client.authorize(**{k: v for k, v in arguments.items() if v})
+                data = result.__dict__ if hasattr(result, "__dict__") else result
+                return [TextContent(type="text", text=json.dumps(data, default=str))]
+            elif name == "notarize_action":
+                result = client.notarize(
+                    action_id=arguments["action_id"],
+                    outcome=arguments.get("outcome", "completed"),
+                    outcome_details=arguments.get("outcome_details"),
+                )
                 data = result.__dict__ if hasattr(result, "__dict__") else result
                 return [TextContent(type="text", text=json.dumps(data, default=str))]
             elif name == "verify_action":
@@ -142,9 +159,6 @@ def create_server(api_key: str | None = None, base_url: str | None = None) -> Se
                 return [TextContent(type="text", text=json.dumps(result, default=str))]
             elif name == "get_reputation":
                 result = client.get_reputation(arguments["agent_slug"])
-                return [TextContent(type="text", text=json.dumps(result, default=str))]
-            elif name == "request_mutual_sign":
-                result = client.request_mutual_sign(arguments["action_id"], arguments["counterparty_did"])
                 return [TextContent(type="text", text=json.dumps(result, default=str))]
             else:
                 return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]

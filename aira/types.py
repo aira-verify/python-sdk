@@ -3,21 +3,59 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+
+
+@dataclass
+class Authorization:
+    """Response from :meth:`Aira.authorize` — step 1 of the two-step flow.
+
+    Status values:
+    - ``"authorized"``: the agent may now execute the action, then call
+      :meth:`Aira.notarize` with ``action_id`` to mint the receipt.
+    - ``"pending_approval"``: the action is held for human review. The agent
+      should not execute yet — wait for an approver to act, then poll
+      :meth:`Aira.get_action` or handle the ``action.approved`` webhook.
+    """
+
+    action_id: str
+    status: str  # "authorized" | "pending_approval"
+    created_at: str
+    request_id: str
+    warnings: list[str] | None = None
 
 
 @dataclass
 class ActionReceipt:
+    """Response from :meth:`Aira.notarize` — step 2 of the two-step flow.
+
+    Status values:
+    - ``"notarized"``: the action outcome was reported as ``"completed"`` and
+      a cryptographic receipt has been minted. ``receipt_id``, ``payload_hash``,
+      and ``signature`` are populated.
+    - ``"failed"``: the action outcome was reported as ``"failed"``. No
+      receipt is minted — signature/payload_hash/receipt_id will be ``None``.
+    """
+
     action_id: str
+    status: str  # "notarized" | "failed"
     created_at: str
     request_id: str
     receipt_id: str | None = None
     payload_hash: str | None = None
     signature: str | None = None
     timestamp_token: str | None = None
-    status: str = "notarized"
     warnings: list[str] | None = None
-    policy_evaluation: dict | None = None  # {policy_id, policy_name, decision, reasoning, confidence}
+
+
+@dataclass
+class CosignResult:
+    """Response from :meth:`Aira.cosign_action` — human co-signature on an action."""
+
+    action_id: str
+    cosigner_email: str
+    cosigned_at: str
+    cosignature_id: str
+    request_id: str | None = None
 
 
 @dataclass
