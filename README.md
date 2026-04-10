@@ -331,17 +331,24 @@ async with AsyncAira(api_key="aira_live_xxx") as aira:
 
 ## Framework Integrations
 
-Drop Aira into your existing agent framework with one line. Each integration either **gates** actions (authorize before execution, abort on deny) or **audits** them (record post-hoc). Whether gating is possible depends on whether the framework exposes a pre-execution hook that can abort.
+Drop Aira into your existing agent framework with one line. Every integration is honestly labeled as one of three types:
 
-| Framework | Install | Integration Class | Mode |
-|---|---|---|---|
-| **LangChain** | `pip install aira-sdk[langchain]` | `AiraCallbackHandler` | **Gate** (tools) / Audit (chain, LLM) |
-| **OpenAI Agents** | `pip install aira-sdk[openai-agents]` | `AiraGuardrail` | **Gate** |
-| **Google ADK** | `pip install aira-sdk[google-adk]` | `AiraPlugin` | **Gate** |
-| **AWS Bedrock** | `pip install aira-sdk[bedrock]` | `AiraBedrockHandler` | **Gate** |
-| **CrewAI** | `pip install aira-sdk[crewai]` | `AiraCrewHook` | Audit-only |
-| **MCP** | `pip install aira-sdk[mcp]` | MCP Server | N/A (exposes Aira as a tool) |
-| **CLI** | `pip install aira-sdk[cli]` | `aira` command | N/A |
+- **gate** — intercepts before execution and can deny. The action is authorized through Aira's policy engine *before* the framework runs the underlying call. Denied actions never run.
+- **audit** — runs after execution because the host framework does not expose a pre-execution hook that can abort. Aira still records a signed receipt; it just cannot prevent the action.
+- **adapter** — exposes Aira's own API as a tool the host framework can call. Neither a gate nor an audit hook over other tools.
+
+We ship fewer integrations than some competitors, and we label every one of them honestly. The integration matrix is generated from `aira.extras.INTEGRATIONS` — the docs cannot drift from the code.
+
+| Integration | Install | Type | Pre-execution gate? | Surface | Notes |
+|---|---|---|---|---|---|
+| **LangChain** | `pip install aira-sdk[langchain]` | gate | Yes (tools); No (chains/LLMs) | `AiraCallbackHandler` | `on_tool_start` raises `AiraToolDenied` when policy denies. Chain/LLM hooks fire after execution and are reported as a fast authorize+notarize cycle. |
+| **OpenAI Agents** | `pip install aira-sdk[openai-agents]` | gate | Yes | `AiraGuardrail.wrap_tool()` | Wraps each tool function: `authorize()` runs before the underlying tool body. Denied calls raise; failed calls report `outcome="failed"`. |
+| **AWS Bedrock** | `pip install aira-sdk[bedrock]` | gate | Yes | `AiraBedrockHandler.wrap_invoke_model()` | Wraps boto3 Bedrock clients. `authorize()` runs before `invoke_model` / `invoke_agent`; denied invocations raise `AiraInvocationDenied`. |
+| **Google ADK** | `pip install aira-sdk[google-adk]` | gate | Yes | `AiraPlugin.before_tool_call()` | `before_tool_call` hook gates tool execution; denied calls raise. |
+| **CrewAI** | `pip install aira-sdk[crewai]` | audit | **No** | `AiraCrewHook` | CrewAI's `task_callback` / `step_callback` fire AFTER execution; there is no pre-execution hook in CrewAI to intercept. For real gating, call `Aira.authorize()` inside your tool body before any side-effect. |
+| **MCP** | `pip install aira-sdk[mcp]` | adapter | N/A | `aira.extras.mcp.create_server()` | Exposes Aira's `authorize`/`notarize`/`verify` as MCP tools an agent can call. Not a wrapper over other MCP tools — it's a protocol adapter. |
+| **Webhooks** | (built in) | adapter | N/A | `verify_signature`, `parse_event` | Standalone HMAC-SHA256 webhook signature verifier. Not an agent integration. |
+| **CLI** | `pip install aira-sdk[cli]` | adapter | N/A | `aira` command | Command-line client for ad-hoc authorize / notarize / verify. |
 
 ### LangChain (gate on tools, audit on chain/LLM)
 
