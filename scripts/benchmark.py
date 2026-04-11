@@ -123,6 +123,102 @@ SAMPLE_POLICY_CONDITIONS = [
     {"field": "country", "op": "in", "value": ["DE", "FR", "AT", "IT"]},
 ]
 
+
+# ── Merkle tree (matches backend settlement + compliance bundle logic) ──
+
+LEAF_PREFIX = b"\x00"
+NODE_PREFIX = b"\x01"
+
+
+def _merkle_leaf_hash(value: str) -> bytes:
+    return hashlib.sha256(LEAF_PREFIX + value.encode()).digest()
+
+
+def _merkle_node_hash(left: bytes, right: bytes) -> bytes:
+    return hashlib.sha256(NODE_PREFIX + left + right).digest()
+
+
+def build_merkle_root(values: list[str]) -> str:
+    """RFC 6962-style Merkle root, matches backend.app.services.merkle."""
+    if not values:
+        return hashlib.sha256(LEAF_PREFIX + b"").hexdigest()
+    layer = [_merkle_leaf_hash(v) for v in values]
+    while len(layer) > 1:
+        next_layer: list[bytes] = []
+        for i in range(0, len(layer), 2):
+            left = layer[i]
+            right = layer[i + 1] if i + 1 < len(layer) else left
+            next_layer.append(_merkle_node_hash(left, right))
+        layer = next_layer
+    return layer[0].hex()
+
+
+def inclusion_proof(values: list[str], index: int) -> list[bytes]:
+    """Return the sibling chain for an index — same as backend."""
+    layer = [_merkle_leaf_hash(v) for v in values]
+    siblings: list[bytes] = []
+    i = index
+    while len(layer) > 1:
+        next_layer: list[bytes] = []
+        for k in range(0, len(layer), 2):
+            left = layer[k]
+            right = layer[k + 1] if k + 1 < len(layer) else left
+            next_layer.append(_merkle_node_hash(left, right))
+        sibling_index = i ^ 1 if i ^ 1 < len(layer) else i
+        siblings.append(layer[sibling_index])
+        i //= 2
+        layer = next_layer
+    return siblings
+
+
+# ── KL divergence (matches drift_service.symmetric_kl) ──
+
+def symmetric_kl(p: dict[str, float], q: dict[str, float]) -> float:
+    """Symmetric KL divergence with Laplace smoothing (alpha=1e-6)."""
+    alpha = 1e-6
+    keys = set(p) | set(q)
+    total_p = sum(p.values()) + alpha * len(keys)
+    total_q = sum(q.values()) + alpha * len(keys)
+    kl_pq = 0.0
+    kl_qp = 0.0
+    import math
+    for k in keys:
+        pk = (p.get(k, 0.0) + alpha) / total_p
+        qk = (q.get(k, 0.0) + alpha) / total_q
+        kl_pq += pk * math.log(pk / qk)
+        kl_qp += qk * math.log(qk / pk)
+    return (kl_pq + kl_qp) / 2
+
+
+# ── Content scan (representative subset of the backend regex library) ──
+
+import re
+
+_SCAN_PATTERNS = [
+    re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),  # email
+    re.compile(r"\b(?:\d[ -]*?){13,16}\b"),  # credit card candidate
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),  # OpenAI-style API key
+    re.compile(r"aira_live_[A-Za-z0-9]{20,}"),  # Aira API key
+    re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),  # SSN
+    re.compile(r"(?i)password\s*[:=]\s*\S+"),  # password assignment
+]
+
+
+def scan_for_secrets(text: str) -> list[str]:
+    """Return every pattern name that matched. Backend runs ~30+, this is 6."""
+    hits: list[str] = []
+    for p in _SCAN_PATTERNS:
+        if p.search(text):
+            hits.append(p.pattern[:20])
+    return hits
+
+
+SCAN_SAMPLE = (
+    "Customer support ticket: user alice@example.com reported that her "
+    "card 4532 1234 5678 9010 was declined. API key sk-abc123xyz456def "
+    "is in the logs — please rotate. No SSN or password shared."
+)
+
 SAMPLE_CONTEXT = {
     "action_type": "loan_decision",
     "amount": 200_000,
@@ -230,6 +326,39 @@ def main() -> None:
     results.append(
         bench("end-to-end (rules eval + receipt mint, in-process)",
               end_to_end)
+    )
+
+    # ── New primitives: Merkle, drift, content scan ──
+
+    merkle_values = [f"sha256:{i:064x}" for i in range(100)]  # 100-leaf batch
+    results.append(
+        bench("merkle_root_100 (settlement / bundle commitment, 100 leaves)",
+              lambda: build_merkle_root(merkle_values),
+              iterations=2_000)
+    )
+
+    results.append(
+        bench("merkle_root_1k (settlement / bundle commitment, 1k leaves)",
+              lambda: build_merkle_root([f"sha256:{i:064x}" for i in range(1000)]),
+              iterations=200)
+    )
+
+    results.append(
+        bench("merkle_inclusion_proof_100 (per-receipt proof in a 100-leaf batch)",
+              lambda: inclusion_proof(merkle_values, 42),
+              iterations=2_000)
+    )
+
+    baseline_dist = {"email": 0.6, "api_call": 0.3, "db_write": 0.1}
+    window_dist = {"email": 0.5, "api_call": 0.35, "db_write": 0.12, "export": 0.03}
+    results.append(
+        bench("symmetric_kl (drift divergence, ~4 action types)",
+              lambda: symmetric_kl(baseline_dist, window_dist))
+    )
+
+    results.append(
+        bench("content_scan_6_patterns (subset of 30+ pattern library)",
+              lambda: scan_for_secrets(SCAN_SAMPLE))
     )
 
     for r in results:

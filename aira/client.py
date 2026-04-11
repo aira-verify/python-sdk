@@ -589,11 +589,16 @@ class Aira:
         period_end: str,
         title: str | None = None,
         agent_filter: list[str] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict:
         """Seal a regulator-ready evidence bundle for a date range.
 
         ``framework`` must be one of: ``eu_ai_act_art12``, ``iso_42001``,
         ``aiuc_1``, ``soc_2_cc7``, ``raw``.
+
+        Pass ``idempotency_key`` (unique per org) to make the request safe
+        to retry — the second call returns the original bundle and does
+        NOT charge a second operation.
 
         Returns the bundle's id, Merkle root, signature, framework
         summary, and signing key id. Use :meth:`export_compliance_bundle`
@@ -605,6 +610,7 @@ class Aira:
             period_end=period_end,
             title=title,
             agent_filter=agent_filter,
+            idempotency_key=idempotency_key,
         )
         return self._post("/compliance/bundles", body)
 
@@ -1184,6 +1190,7 @@ class AsyncAira:
         period_end: str,
         title: str | None = None,
         agent_filter: list[str] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict:
         """Async mirror of :meth:`Aira.create_compliance_bundle`."""
         body = _build_body(
@@ -1192,6 +1199,7 @@ class AsyncAira:
             period_end=period_end,
             title=title,
             agent_filter=agent_filter,
+            idempotency_key=idempotency_key,
         )
         return await self._post("/compliance/bundles", body)
 
