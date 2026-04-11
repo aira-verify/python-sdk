@@ -54,8 +54,8 @@ def test_required_competitive_integrations_present():
 
 
 def test_at_least_four_real_gates():
-    """SidClaw counts integrations; we win on quality. At least four of our
-    integrations must be real gates, not audit shims."""
+    """Quality over count. At least four of our integrations must be real
+    pre-execution gates, not audit shims that only record after the fact."""
     gates = [s for s in INTEGRATIONS if s.kind == "gate"]
     assert len(gates) >= 4, (
         f"Only {len(gates)} real-gate integrations; need at least 4 to credibly "
