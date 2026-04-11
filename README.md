@@ -61,6 +61,100 @@ elif auth.status == "pending_approval":
 
 **What just happened:** Aira gated this action before you executed it. If a policy would have denied the wire transfer, `authorize()` raises `AiraError("POLICY_DENIED")` and your code never calls `send_wire()`. If a policy held the action for human review, `auth.status` is `"pending_approval"` and you queue it. Only authorized actions are ever executed, and every executed action is followed by a `notarize()` call that mints the cryptographic receipt. Failed executions are still recorded via `notarize(outcome="failed")` — no receipt is minted but the action transitions correctly.
 
+### Reproducibility metadata (replay context)
+
+Pass any of the following optional fields to `authorize()` and they're committed in the signed receipt payload (v1.3) and surfaced via `get_replay_context()` so an external replay tool can confirm it has the same inputs as the original run:
+
+```python
+auth = aira.authorize(
+    action_type="tool_call",
+    details="Calling search() with structured input",
+    agent_id="research-agent",
+    model_id="claude-sonnet-4-6",
+    # Optional reproducibility metadata
+    system_prompt_hash="sha256:a1b2c3...",
+    tool_inputs_hash="sha256:d4e5f6...",
+    model_params={"temperature": 0.0, "top_p": 1.0, "seed": 42},
+    execution_env={
+        "sdk_version": "2.0.1",
+        "framework": "langchain",
+        "framework_version": "0.3.0",
+    },
+)
+```
+
+---
+
+## Compliance bundles
+
+Seal a regulator-ready evidence bundle for a date range. Every receipt in the period is Merkle-rooted, signed, and the export is JWKS-verifiable offline.
+
+```python
+# Build a Q1 2026 EU AI Act Article 12 evidence packet
+bundle = aira.create_compliance_bundle(
+    framework="eu_ai_act_art12",  # also: iso_42001, aiuc_1, soc_2_cc7, raw
+    period_start="2026-01-01T00:00:00Z",
+    period_end="2026-04-01T00:00:00Z",
+    title="Q1 2026 evidence packet",
+    agent_filter=["payments-agent", "support-agent"],
+)
+print(bundle["merkle_root"])    # SHA-256 over receipts[*].payload_hash
+print(bundle["receipt_count"])  # how many receipts were sealed
+
+# Download the self-contained JSON for an auditor
+exported = aira.export_compliance_bundle(bundle["id"])
+# `exported` includes every receipt, the JWKS URL, and a verification recipe.
+```
+
+## Drift detection
+
+Per-agent behavioral baselines + KL divergence scoring + alerts when an agent's behavior shifts away from its expected pattern.
+
+```python
+# Compute a baseline from the last 7 days of action history
+from datetime import datetime, timedelta, timezone
+end = datetime.now(timezone.utc)
+start = end - timedelta(days=7)
+
+aira.compute_drift_baseline(
+    agent_id="payments-agent",
+    window_start=start.isoformat(),
+    window_end=end.isoformat(),
+)
+
+# Or seed a baseline from a config dict (for cold-start agents)
+aira.seed_synthetic_baseline(
+    agent_id="payments-agent",
+    expected_distribution={"wire_transfer": 0.05, "email_sent": 0.40, "api_call": 0.55},
+    expected_actions_per_day=200,
+)
+
+# Read-only status check for dashboards
+status = aira.get_drift_status("payments-agent", lookback_hours=24)
+print(status["kl_divergence"], status["volume_ratio"], status["severity"])
+
+# Run a check that records an alert if the threshold is exceeded
+alert = aira.run_drift_check("payments-agent")
+if alert:
+    print(f"Drift detected: {alert['severity']}")
+```
+
+## Merkle settlement
+
+Periodic Merkle anchoring of action receipts. Every receipt eventually gets sealed into exactly one settlement; the settlement's Merkle root is the cryptographic commitment that the batch existed at a specific moment in time.
+
+```python
+# Admin: seal all unsettled receipts
+settlement = aira.create_settlement()
+if settlement:
+    print(settlement["merkle_root"], settlement["receipt_count"])
+
+# An auditor wants to prove a single receipt was in a settlement
+proof = aira.get_settlement_inclusion_proof("rct-abc-123")
+# Proof has {merkle_root, leaf_hash, index, leaf_count, siblings}
+# A regulator can verify it offline with a 10-line pure-function walker.
+```
+
 ---
 
 ## Core SDK Methods
@@ -69,7 +163,7 @@ Every method on `Aira` (sync) is mirrored on `AsyncAira` (async).
 
 | Category | Method | Description |
 |---|---|---|
-| **Actions** | `authorize()` | **Step 1**: ask Aira for permission. Returns `Authorization` with status `authorized` or `pending_approval`. Raises `AiraError("POLICY_DENIED")` if denied. |
+| **Actions** | `authorize()` | **Step 1**: ask Aira for permission. Returns `Authorization` with status `authorized` or `pending_approval`. Raises `AiraError("POLICY_DENIED")` if denied. Accepts optional replay context fields (`system_prompt_hash`, `tool_inputs_hash`, `model_params`, `execution_env`). |
 | | `notarize()` | **Step 2**: report outcome (`completed` or `failed`). Mints the Ed25519 receipt when completed. |
 | | `get_action()` | Retrieve action details + receipt |
 | | `list_actions()` | List actions with filters (type, agent, status) |
@@ -77,7 +171,23 @@ Every method on `Aira` (sync) is mirrored on `AsyncAira` (async).
 | | `set_legal_hold()` | Prevent deletion -- litigation hold |
 | | `release_legal_hold()` | Release litigation hold |
 | | `get_action_chain()` | Chain of custody for an action |
-| | `verify_action()` | Public verification -- no auth required |
+| | `get_replay_context()` | All reproducibility metadata for an action (system prompt hash, tool inputs hash, model params, execution env) |
+| | `verify_action()` | Public verification -- no auth required. Returns full evidence (signature, public key, signed payload, RFC 3161 token) plus the second-party `policy_evaluator_attestation` for multi-party signing. |
+| **Compliance** | `create_compliance_bundle()` | Seal a regulator-ready evidence bundle for a date range. Frameworks: `eu_ai_act_art12`, `iso_42001`, `aiuc_1`, `soc_2_cc7`, `raw`. Merkle-rooted, signed, JWKS-verifiable offline. |
+| | `list_compliance_bundles()` | List bundles for the org |
+| | `get_compliance_bundle()` | Get bundle metadata |
+| | `export_compliance_bundle()` | Download the self-contained JSON for offline verification |
+| | `get_bundle_inclusion_proof()` | Merkle inclusion proof for one receipt within a bundle |
+| **Drift** | `get_drift_status()` | Read-only KL divergence + volume ratio against the active baseline |
+| | `compute_drift_baseline()` | Build a baseline from a window of production action history |
+| | `seed_synthetic_baseline()` | Seed a baseline from a config dict (cold start) |
+| | `run_drift_check()` | Score the current window and persist a `DriftAlert` if it exceeds the threshold |
+| | `list_drift_alerts()` | List drift alerts for an agent |
+| | `acknowledge_drift_alert()` | Acknowledge an alert |
+| **Settlement** | `create_settlement()` | Seal every unsettled receipt into a Merkle-rooted, signed batch (admin-only) |
+| | `list_settlements()` | List settlements |
+| | `get_settlement()` | Get settlement metadata |
+| | `get_settlement_inclusion_proof()` | Get a receipt's Merkle inclusion proof from its settlement |
 | **Agents** | `register_agent()` | Register verifiable agent identity |
 | | `get_agent()` | Retrieve agent profile |
 | | `list_agents()` | List registered agents |
@@ -531,7 +641,7 @@ if is_valid:
     print(event.delivery_id)  # Unique delivery ID
 ```
 
-Supported event types: `action.notarized`, `action.authorized`, `agent.registered`, `agent.decommissioned`, `evidence.sealed`, `escrow.deposited`, `escrow.released`, `escrow.disputed`, `compliance.snapshot_created`, `case.complete`, `case.requires_human_review`.
+Supported event types: `action.notarized`, `action.authorized`, `action.approval_requested`, `action.approved`, `action.denied_by_human`, `agent.registered`, `agent.decommissioned`, `agent.drift_detected`, `evidence.sealed`, `compliance.bundle_sealed`, `compliance.snapshot_created`, `receipts.settlement_sealed`, `case.complete`, `case.requires_human_review`, `case.policy_denied`, `escrow.deposited`, `escrow.released`, `escrow.disputed`.
 
 ---
 

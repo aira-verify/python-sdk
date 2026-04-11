@@ -211,6 +211,11 @@ class Aira:
         idempotency_key: str | None = None,
         require_approval: bool = False,
         approvers: list[str] | None = None,
+        # F10: replay context — optional reproducibility metadata.
+        system_prompt_hash: str | None = None,
+        tool_inputs_hash: str | None = None,
+        model_params: dict | None = None,
+        execution_env: dict | None = None,
     ) -> Authorization:
         """Step 1 of 2: ask Aira for permission to perform an action.
 
@@ -223,6 +228,16 @@ class Aira:
         - ``"pending_approval"``: held for human review. The agent should not
           execute — wait for an approver to act on it, then handle the
           ``action.approved`` webhook or poll :meth:`get_action`.
+
+        Optional reproducibility metadata (replay context) is committed in the
+        signed receipt payload (v1.3) and surfaced via :meth:`get_replay_context`
+        so an external replay tool can confirm it has the same inputs as the
+        original run:
+
+        - ``system_prompt_hash``: SHA-256 of the system prompt
+        - ``tool_inputs_hash``: SHA-256 of the tool input arguments
+        - ``model_params``: ``{"temperature": ..., "top_p": ..., "seed": ...}``
+        - ``execution_env``: ``{"sdk_version": ..., "framework": ..., "framework_version": ...}``
 
         Raises:
             AiraError: with ``code="POLICY_DENIED"`` if a policy denied the
@@ -243,6 +258,10 @@ class Aira:
             idempotency_key=idempotency_key,
             require_approval=require_approval or None,
             approvers=approvers,
+            system_prompt_hash=system_prompt_hash,
+            tool_inputs_hash=tool_inputs_hash,
+            model_params=model_params,
+            execution_env=execution_env,
         )
         if store_details:
             body["store_details"] = True
@@ -550,6 +569,160 @@ class Aira:
         """Verify a reputation score by returning inputs and score_hash."""
         return self._get(f"/agents/{slug}/reputation/verify")
 
+    # ==================== Replay context (F10) ====================
+
+    def get_replay_context(self, action_id: str) -> dict:
+        """Get all reproducibility metadata stored for an action.
+
+        Returns the system_prompt_hash, tool_inputs_hash, model_params,
+        execution_env, and other knobs that an external replay tool
+        needs to confirm it has the same inputs as the original run.
+        """
+        return self._get(f"/actions/{action_id}/replay-context")
+
+    # ==================== Compliance bundles ====================
+
+    def create_compliance_bundle(
+        self,
+        framework: str,
+        period_start: str,
+        period_end: str,
+        title: str | None = None,
+        agent_filter: list[str] | None = None,
+    ) -> dict:
+        """Seal a regulator-ready evidence bundle for a date range.
+
+        ``framework`` must be one of: ``eu_ai_act_art12``, ``iso_42001``,
+        ``aiuc_1``, ``soc_2_cc7``, ``raw``.
+
+        Returns the bundle's id, Merkle root, signature, framework
+        summary, and signing key id. Use :meth:`export_compliance_bundle`
+        to download the self-contained JSON for offline verification.
+        """
+        body = _build_body(
+            framework=framework,
+            period_start=period_start,
+            period_end=period_end,
+            title=title,
+            agent_filter=agent_filter,
+        )
+        return self._post("/compliance/bundles", body)
+
+    def list_compliance_bundles(self, page: int = 1, per_page: int = 20) -> PaginatedList:
+        """List compliance bundles for the org."""
+        return _paginated(
+            self._get(f"/compliance/bundles?page={page}&per_page={per_page}")
+        )
+
+    def get_compliance_bundle(self, bundle_id: str) -> dict:
+        """Get a compliance bundle's metadata."""
+        return self._get(f"/compliance/bundles/{bundle_id}")
+
+    def export_compliance_bundle(self, bundle_id: str) -> dict:
+        """Download the self-contained JSON document for the bundle.
+
+        The exported document inlines every receipt's signed payload +
+        signature, the JWKS URL, and a verification recipe so an auditor
+        can re-verify offline against /.well-known/jwks.json.
+        """
+        return self._get(f"/compliance/bundles/{bundle_id}/export")
+
+    def get_bundle_inclusion_proof(self, bundle_id: str, receipt_id: str) -> dict:
+        """Merkle inclusion proof for one receipt within a compliance bundle."""
+        return self._get(
+            f"/compliance/bundles/{bundle_id}/inclusion-proof/{receipt_id}"
+        )
+
+    # ==================== Drift detection ====================
+
+    def get_drift_status(self, agent_id: str, lookback_hours: int = 24) -> dict:
+        """Score the agent's recent behavior against its active baseline.
+
+        Read-only — does NOT persist an alert. Use this for dashboards.
+        Use :meth:`run_drift_check` to actually record an alert.
+        """
+        return self._get(
+            f"/agents/{agent_id}/drift?lookback_hours={lookback_hours}"
+        )
+
+    def compute_drift_baseline(
+        self,
+        agent_id: str,
+        window_start: str,
+        window_end: str,
+        activate: bool = True,
+    ) -> dict:
+        """Compute a behavioral baseline from production action history."""
+        return self._post(
+            f"/agents/{agent_id}/drift/baseline",
+            _build_body(window_start=window_start, window_end=window_end, activate=activate),
+        )
+
+    def seed_synthetic_baseline(
+        self,
+        agent_id: str,
+        expected_distribution: dict[str, float],
+        expected_actions_per_day: float,
+        activate: bool = True,
+    ) -> dict:
+        """Seed a baseline from a config dict (for cold-start agents)."""
+        return self._post(
+            f"/agents/{agent_id}/drift/baseline/synthetic",
+            _build_body(
+                expected_distribution=expected_distribution,
+                expected_actions_per_day=expected_actions_per_day,
+                activate=activate,
+            ),
+        )
+
+    def run_drift_check(self, agent_id: str, lookback_hours: int = 24) -> dict | None:
+        """Score the current window and persist an alert if it exceeds
+        the threshold. Returns the alert (or None if no drift)."""
+        return self._post(
+            f"/agents/{agent_id}/drift/check?lookback_hours={lookback_hours}", {}
+        )
+
+    def list_drift_alerts(
+        self, agent_id: str, page: int = 1, acknowledged: bool | None = None,
+    ) -> PaginatedList:
+        """List drift alerts for an agent."""
+        params = f"page={page}&per_page=50"
+        if acknowledged is not None:
+            params += f"&acknowledged={str(acknowledged).lower()}"
+        return _paginated(
+            self._get(f"/agents/{agent_id}/drift/alerts?{params}")
+        )
+
+    def acknowledge_drift_alert(self, agent_id: str, alert_id: str) -> dict:
+        """Acknowledge a drift alert (requires JWT auth)."""
+        return self._post(
+            f"/agents/{agent_id}/drift/alerts/{alert_id}/acknowledge", {}
+        )
+
+    # ==================== Merkle settlement (F8) ====================
+
+    def create_settlement(self) -> dict | None:
+        """Seal every unsettled receipt for the org into a new settlement.
+
+        Admin-only. Returns the new settlement, or None if there were no
+        unsettled receipts (no-op).
+        """
+        return self._post("/settlements", {})
+
+    def list_settlements(self, page: int = 1, per_page: int = 20) -> PaginatedList:
+        """List settlements for the org."""
+        return _paginated(
+            self._get(f"/settlements?page={page}&per_page={per_page}")
+        )
+
+    def get_settlement(self, settlement_id: str) -> dict:
+        """Get a settlement's metadata."""
+        return self._get(f"/settlements/{settlement_id}")
+
+    def get_settlement_inclusion_proof(self, receipt_id: str) -> dict:
+        """Get the Merkle inclusion proof for one receipt in its settlement."""
+        return self._get(f"/settlements/inclusion-proof/{receipt_id}")
+
     # ==================== Offline sync ====================
 
     @property
@@ -691,6 +864,11 @@ class AsyncAira:
         idempotency_key: str | None = None,
         require_approval: bool = False,
         approvers: list[str] | None = None,
+        # F10: replay context — optional reproducibility metadata.
+        system_prompt_hash: str | None = None,
+        tool_inputs_hash: str | None = None,
+        model_params: dict | None = None,
+        execution_env: dict | None = None,
     ) -> Authorization:
         """Step 1 of 2: ask Aira for permission to perform an action.
 
@@ -709,6 +887,10 @@ class AsyncAira:
             idempotency_key=idempotency_key,
             require_approval=require_approval or None,
             approvers=approvers,
+            system_prompt_hash=system_prompt_hash,
+            tool_inputs_hash=tool_inputs_hash,
+            model_params=model_params,
+            execution_env=execution_env,
         )
         if store_details:
             body["store_details"] = True
@@ -986,6 +1168,119 @@ class AsyncAira:
     async def verify_reputation(self, slug: str) -> dict:
         """Verify a reputation score by returning inputs and score_hash."""
         return await self._get(f"/agents/{slug}/reputation/verify")
+
+    # ==================== Replay context (F10) ====================
+
+    async def get_replay_context(self, action_id: str) -> dict:
+        """Async mirror of :meth:`Aira.get_replay_context`."""
+        return await self._get(f"/actions/{action_id}/replay-context")
+
+    # ==================== Compliance bundles ====================
+
+    async def create_compliance_bundle(
+        self,
+        framework: str,
+        period_start: str,
+        period_end: str,
+        title: str | None = None,
+        agent_filter: list[str] | None = None,
+    ) -> dict:
+        """Async mirror of :meth:`Aira.create_compliance_bundle`."""
+        body = _build_body(
+            framework=framework,
+            period_start=period_start,
+            period_end=period_end,
+            title=title,
+            agent_filter=agent_filter,
+        )
+        return await self._post("/compliance/bundles", body)
+
+    async def list_compliance_bundles(self, page: int = 1, per_page: int = 20) -> PaginatedList:
+        return _paginated(
+            await self._get(f"/compliance/bundles?page={page}&per_page={per_page}")
+        )
+
+    async def get_compliance_bundle(self, bundle_id: str) -> dict:
+        return await self._get(f"/compliance/bundles/{bundle_id}")
+
+    async def export_compliance_bundle(self, bundle_id: str) -> dict:
+        return await self._get(f"/compliance/bundles/{bundle_id}/export")
+
+    async def get_bundle_inclusion_proof(self, bundle_id: str, receipt_id: str) -> dict:
+        return await self._get(
+            f"/compliance/bundles/{bundle_id}/inclusion-proof/{receipt_id}"
+        )
+
+    # ==================== Drift detection ====================
+
+    async def get_drift_status(self, agent_id: str, lookback_hours: int = 24) -> dict:
+        return await self._get(
+            f"/agents/{agent_id}/drift?lookback_hours={lookback_hours}"
+        )
+
+    async def compute_drift_baseline(
+        self,
+        agent_id: str,
+        window_start: str,
+        window_end: str,
+        activate: bool = True,
+    ) -> dict:
+        return await self._post(
+            f"/agents/{agent_id}/drift/baseline",
+            _build_body(window_start=window_start, window_end=window_end, activate=activate),
+        )
+
+    async def seed_synthetic_baseline(
+        self,
+        agent_id: str,
+        expected_distribution: dict[str, float],
+        expected_actions_per_day: float,
+        activate: bool = True,
+    ) -> dict:
+        return await self._post(
+            f"/agents/{agent_id}/drift/baseline/synthetic",
+            _build_body(
+                expected_distribution=expected_distribution,
+                expected_actions_per_day=expected_actions_per_day,
+                activate=activate,
+            ),
+        )
+
+    async def run_drift_check(self, agent_id: str, lookback_hours: int = 24) -> dict | None:
+        return await self._post(
+            f"/agents/{agent_id}/drift/check?lookback_hours={lookback_hours}", {}
+        )
+
+    async def list_drift_alerts(
+        self, agent_id: str, page: int = 1, acknowledged: bool | None = None,
+    ) -> PaginatedList:
+        params = f"page={page}&per_page=50"
+        if acknowledged is not None:
+            params += f"&acknowledged={str(acknowledged).lower()}"
+        return _paginated(
+            await self._get(f"/agents/{agent_id}/drift/alerts?{params}")
+        )
+
+    async def acknowledge_drift_alert(self, agent_id: str, alert_id: str) -> dict:
+        return await self._post(
+            f"/agents/{agent_id}/drift/alerts/{alert_id}/acknowledge", {}
+        )
+
+    # ==================== Merkle settlement (F8) ====================
+
+    async def create_settlement(self) -> dict | None:
+        return await self._post("/settlements", {})
+
+    async def list_settlements(self, page: int = 1, per_page: int = 20) -> PaginatedList:
+        return _paginated(
+            await self._get(f"/settlements?page={page}&per_page={per_page}")
+        )
+
+    async def get_settlement(self, settlement_id: str) -> dict:
+        return await self._get(f"/settlements/{settlement_id}")
+
+    async def get_settlement_inclusion_proof(self, receipt_id: str) -> dict:
+        return await self._get(f"/settlements/inclusion-proof/{receipt_id}")
 
     # ==================== Offline sync ====================
 
