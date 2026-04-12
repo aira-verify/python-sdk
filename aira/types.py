@@ -74,6 +74,7 @@ class ReceiptSummary:
     timestamp_token: str | None
     receipt_version: str
     verify_url: str
+    created_at: str | None = None
 
 
 @dataclass
