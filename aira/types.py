@@ -95,6 +95,10 @@ class ActionDetail:
     model_version: str | None = None
     parent_action_id: str | None = None
     receipt: ReceiptSummary | None = None
+    system_prompt_hash: str | None = None
+    tool_inputs_hash: str | None = None
+    model_params: dict | None = None
+    execution_env: dict | None = None
     authorizations: list[AuthorizationSummary] = field(default_factory=list)
 
 
@@ -208,6 +212,7 @@ class VerifyResult:
     algorithm: str | None = None
     timestamp_token: str | None = None
     signed_payload: dict | None = None
+    policy_evaluator_attestation: dict | None = None
 
 
 @dataclass
